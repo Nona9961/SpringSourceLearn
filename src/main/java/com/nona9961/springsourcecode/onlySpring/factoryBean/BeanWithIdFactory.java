@@ -4,7 +4,7 @@ import com.nona9961.springsourcecode.withSpringboot.entity.BeanWithId;
 import org.springframework.beans.factory.FactoryBean;
 
 /**
- * @author hu mingcheng
+ * @author nona9961gcheng
  * @date 2021/10/28 16:46
  */
 public class BeanWithIdFactory implements FactoryBean<BeanWithId> {
