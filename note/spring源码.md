@@ -1303,6 +1303,11 @@ synchronized (this.startupShutdownMonitor) {
     ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
     // 准备在该context使用的beanFactory
     prepareBeanFactory(beanFactory);
+    try {
+        // 模板方法，子类自定义处理beanFactory
+        postProcessBeanFactory(beanFactory);
+        // ...
+    }
 }
 ```
 
@@ -1389,6 +1394,8 @@ protected ConfigurableListableBeanFactory obtainFreshBeanFactory() {
 #### 3.3 再看BeanFactory
 
 本来该继续下一个方法`prepareBeanFactory(beanFactory);`的。根据注释，这个方法全部都是对新的beanFactory进行标准配置…………但一眼下去，这又是一大堆没见过的方法，逼得我们不得不重新审视一下`ConfigurableListableBeanFactory`。
+
+本节会很长，因为`BeanFactory`子接口定义的方法又多又繁杂，在全面了解之前还不好理清逻辑，所以这一节需要下点功夫。
 
 在之前对于`BeanFactory`接口的介绍中，我们只对其两个子接口：`ListableBeanFactory`和`HierarchicalBeanFactory`两个接口进行过简单的介绍，但事实上还有一个也比较重要的接口：`AutowireCapableBeanFactory`没有提及。这是因为这跟我们寻找容器在哪没有直接联系（上面2个在接口中提到了，我就简单的的说了一下），为了逻辑清晰，我选择性地跳过了这一部分。而现在已经到全面建设`BeanFactory`的时候了，那这再不看一下确实不合适了。
 
@@ -1602,6 +1609,7 @@ beanFactory.setBeanClassLoader(getClassLoader());
    - tempClassLoader：用于类型匹配
      - 涉及加载时编织（load-time weaving）将会只用临时类加载器，以保证实际实例的懒加载
      - 当beanFactory启动完成之后，将会删去临时类加载器
+     - 可以猜测，这里应该和AOP相关
 
 4. bean元数据相关：
 
@@ -1614,6 +1622,7 @@ beanFactory.setBeanClassLoader(getClassLoader());
    这几个方法和bean元数据相关，根据注释这里的元数据主要是合并bean定义（mergedBeanDefinition）
 
    - 主要针对父子bean，子bean定义（ChildBeanDefiition）加上父bean定义（RootBeanDefinition）的缺省信息组合而成。
+   - 此外合并bean定义是原始bean定义的处理副本
    - 如果方法`isCacheBeanMetadata();`返回的是false，那么这意味着该`beanFactory`不缓存`mergedBeanDefinition`，每次创建bean实例的时候都会重新查询bean class来确定这个bean的类型。
    - `getMergedBeanDefinition()`就是从上述的合并bean定义缓存里拿取bean定义，如果关闭了缓存就从`beanDefinitionMap`里面拿，并且不进行缓存。
 
@@ -1727,7 +1736,7 @@ beanFactory.setBeanClassLoader(getClassLoader());
 
 注释：
 
-大多数可遍历的beanFactory都要实现该接口，除了`ConfigurableBeanFactory`接口中的配置功能，还提供了**分析、修改bean定义**的方法以及**提前实例化所有单例**的方法。
+大多数可遍历的`beanFactory`都要实现该接口，除了`ConfigurableBeanFactory`接口中的配置功能，还提供了**分析、修改bean定义**的方法以及**提前实例化所有单例**的方法。
 
 现在我们来看看定义的方法：
 
@@ -1741,7 +1750,7 @@ beanFactory.setBeanClassLoader(getClassLoader());
    ```
 
    - 第一个方法：注册自动装配时待忽略的类型（包括接口），这样自动装配的时候就会忽略掉这些类了。
-   
+
    - 第二个方法：取名的反面教材，这个名字很容易和第一个方法进行比较而认为是忽略接口，**但是**，它和第一个方法没有一点关系！这个方法的意思是：
      1. 接口ifc里面声明了setter方法（考虑XXXAware接口）
      
@@ -1763,10 +1772,10 @@ beanFactory.setBeanClassLoader(getClassLoader());
         ```
      
    - 第三个方法：将一个实例注册为该实例类型的装配值。主要用于注入那些不是bean却需要被注入的类型。比如：beanFactory，ApplicationContext等。
-   
+
    - 第四个方法：检测该bean是不是要被注入某个依赖的bean
-   
-2. 缓存相关：
+
+2. 缓存相关：这三个方法都是和缓存相关的方法，其中最后一个我们在之前的`registerBeanDefinition()`中见过，这次我们就来详细看看这几个方法到底是干什么的：
 
    ```java
    void clearMetadataCache();
@@ -1774,13 +1783,159 @@ beanFactory.setBeanClassLoader(getClassLoader());
    boolean isConfigurationFrozen();
    ```
 
-   这三个方法都是和缓存相关的方法，其中最后一个我们在之前的`registerBeanDefinition()`中见过，这次我们就来详细看看这几个方法到底是干什么的：
+   - 第一个方法：删除尚未被视为完整元数据的合并bean定义（被视为完整元数据的bean定义就是那些已经被创建bean的bean定义）
+     - 一般来说，如果修改了原始bean定义，要调用该方法清除缓存。
+   - 第二个方法：冻结所有已经注册的bean定义，表明这些bean定义将不会再被改动。这允许`beanFactory`可以主动缓存bean定义
+   - 第三个方法：这些bean定义是否已经被冻结
 
-   - 第一个方法：
+3. bean定义相关：这三个方法都和bean定义相关
 
-3. 其他：
+   ```java
+   BeanDefinition getBeanDefinition(String beanName) throws NoSuchBeanDefinitionException;
+   Iterator<String> getBeanNamesIterator();
+   void preInstantiateSingletons() throws BeansException;
+   ```
 
+   - 第一个方法：获取bean定义的方法，可以访问该bean定义里属性值和构造参数值，并且可以修改。
+     - 返回的bean定义不能是副本，而就是最原始的bean定义
+     - 不会去父`beanFactory`寻找bean定义
+   - 第二个方法：返回beanName的视图
+   - 第三个方法：初始化所有非懒加载的bean
+     - 一般来说，在`beanFactory`启动的最后调用该方法。
 
+在对`beanFactory`多个重要接口中定义的方法有了大致了解之后，我相信继续后面的源码阅读将会大大减少我们的困难。
+
+#### 3.4 第二部分——完成BeanFactory的准备工作
+
+继续我们的`refresh()`之旅，在重新配置`ApplicationContext`和保证`beanFactory`回到配置之前的状态之后，现在我们到了`prepareBeanFactory()`方法。
+
+```java
+protected void prepareBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+    // 让beanFactory使用applicationContext的类加载器加载class
+    beanFactory.setBeanClassLoader(getClassLoader());
+    if (!shouldIgnoreSpel) {
+        // 如果不忽略spel表达式，向beanFactory注册spel表达式的解析器
+        beanFactory.setBeanExpressionResolver(new StandardBeanExpressionResolver(beanFactory.getBeanClassLoader()));
+    }
+    // 向beanFactory注册Resource相关的类型转换器
+    beanFactory.addPropertyEditorRegistrar(new ResourceEditorRegistrar(this, getEnvironment()));
+
+    // 注册bean后置处理器——用于处理Aware接口中setter方法：调用相应的set方法
+    beanFactory.addBeanPostProcessor(new ApplicationContextAwareProcessor(this));
+    // 忽略setter参数相同的自动装配，注意到基本都是XXXAware接口，这些实例的装配已经在上一行的bean后置处理器中完成了
+    beanFactory.ignoreDependencyInterface(EnvironmentAware.class);
+    beanFactory.ignoreDependencyInterface(EmbeddedValueResolverAware.class);
+    beanFactory.ignoreDependencyInterface(ResourceLoaderAware.class);
+    beanFactory.ignoreDependencyInterface(ApplicationEventPublisherAware.class);
+    beanFactory.ignoreDependencyInterface(MessageSourceAware.class);
+    beanFactory.ignoreDependencyInterface(ApplicationContextAware.class);
+    beanFactory.ignoreDependencyInterface(ApplicationStartupAware.class);
+	// 这四个类的装填使用这俩实例
+    beanFactory.registerResolvableDependency(BeanFactory.class, beanFactory);
+    beanFactory.registerResolvableDependency(ResourceLoader.class, this);
+    beanFactory.registerResolvableDependency(ApplicationEventPublisher.class, this);
+    beanFactory.registerResolvableDependency(ApplicationContext.class, this);
+	// 注册bean后置处理器——将实现了ApplicationListener接口的bean注册为监听器
+    beanFactory.addBeanPostProcessor(new ApplicationListenerDetector(this));
+
+    // 看是不是GraalVM虚拟机，如果是的话直接跳过代码编织能力
+    // 查看有没有AspectJ的代码编织能力，具体后续详谈
+    if (!NativeDetector.inNativeImage() && beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {
+        beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));
+        // 果然TempClassLoader和AOP相关
+        beanFactory.setTempClassLoader(new ContextTypeMatchClassLoader(beanFactory.getBeanClassLoader()));
+    }
+
+    // 注册一些默认的环境bean
+    if (!beanFactory.containsLocalBean(ENVIRONMENT_BEAN_NAME)) {
+        beanFactory.registerSingleton(ENVIRONMENT_BEAN_NAME, getEnvironment());
+    }
+    if (!beanFactory.containsLocalBean(SYSTEM_PROPERTIES_BEAN_NAME)) {
+        beanFactory.registerSingleton(SYSTEM_PROPERTIES_BEAN_NAME, getEnvironment().getSystemProperties());
+    }
+    if (!beanFactory.containsLocalBean(SYSTEM_ENVIRONMENT_BEAN_NAME)) {
+        beanFactory.registerSingleton(SYSTEM_ENVIRONMENT_BEAN_NAME, getEnvironment().getSystemEnvironment());
+    }
+    if (!beanFactory.containsLocalBean(APPLICATION_STARTUP_BEAN_NAME)) {
+        beanFactory.registerSingleton(APPLICATION_STARTUP_BEAN_NAME, getApplicationStartup());
+    }
+}
+```
+
+有了[3.3 再看BeanFactory](#3.3 再看BeanFactory)的基础，再看这部分源码应该很轻松了。这部分源码中涉及到了AOP，这不是我们现在的主线，所以那部分我们就先跳过了。这一部分的配置代码的结束，**标志着beanFactory结束了标准初始化过程**。
+
+最后，我们来到了准备BeanFactory的最后一个方法：
+
+```java
+postProcessBeanFactory(beanFactory);
+```
+
+这个方法默认是一个**空实现**，是模板方法模式：子类通过重写这个方法对beanFactory再进行进一步的**自定义配置**，比如注册一些特殊的bean之类的。
+
+根据注释，调用该方法的时候：
+
+1. beanFactory已经完成了标准初始化过程
+2. 所有bean定义已经全部被加载
+3. 没有任何一个bean被创建
+
+普通Spring没有对其有过实现，在之后Springboot启动时，我们再看看官方的一些动作是什么。
+
+至此`ApplicationContext`和`BeanFactory`的准备已经全部完成，我们简单地回顾一下：
+
+```mermaid
+graph TD
+开启refresh阶段标志 --> 配置applicaitonContext,处理源属性,验证环境属性,处理监听器--> 如果允许的话,重新生成一个携带全部bean定义的BeanFactory --> 配置上一步的beanFactory-->子类自己自定义配置beanFactory
+```
+
+**注意到的地方**：
+
+- refresh()方法是一个被规定好的流程，Spring在流程中加入了模板方法，以便后续拓展。这一点我觉得在流程性很强的代码中可以借鉴借鉴，加入一些模板方法来提高拓展性。	
+  - 这种拓展方式解耦不够彻底，所以他的拓展性有限：每一次修改都要写一个子类、只能根据定好的参数和返回值进行拓展
+  - 
+
+#### 3.5 第三部分——后置处理器
+
+在完成初始化准备之后，接下来我们要干的事情是什么呢？继续往下看
+
+```java
+// ...
+// 开启后置处理器阶段
+StartupStep beanPostProcess = this.applicationStartup.start("spring.context.beans.post-process");
+// 调用已经被注册为bean的beanFactory的后置处理器
+invokeBeanFactoryPostProcessors(beanFactory);
+// 注册拦截创建bean时的bean后置处理器
+registerBeanPostProcessors(beanFactory);
+// 后置处理器阶段结束
+beanPostProcess.end();
+// ...
+```
+
+根据注释可以发现这部分内容就是在处理后置处理器(`PostProcessor`)，不过这两种后置处理器好像有些区别，似乎是前者处理`beanFactory`，后者处理`bean`。
+
+跟进第一个方法：
+
+```java
+protected void invokeBeanFactoryPostProcessors(ConfigurableListableBeanFactory beanFactory) {
+    PostProcessorRegistrationDelegate.invokeBeanFactoryPostProcessors(beanFactory, getBeanFactoryPostProcessors());
+
+    // Detect a LoadTimeWeaver and prepare for weaving, if found in the meantime
+    // (e.g. through an @Bean method registered by ConfigurationClassPostProcessor)
+    if (!NativeDetector.inNativeImage() && beanFactory.getTempClassLoader() == null && beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {
+        beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));
+        beanFactory.setTempClassLoader(new ContextTypeMatchClassLoader(beanFactory.getBeanClassLoader()));
+    }
+}
+```
+
+先看注释：
+
+- 实例化并调用所有已经注册的实现了`BeanFactoryPostProcessor`接口的bean
+- 如果该bean明确了顺序，就按照该顺序来
+- 在单例实例化之前，调用该方法
+
+根据注释，我们发现了一个接口`BeanFactoryPostProcessor`，这个接口和之前遇到过的`BeanPostProcessor`接口名称有些相似，猜测是`BeanFactory`的后置处理器。
+
+进入该接口看看：
 
 
 
