@@ -1,0 +1,1786 @@
+[TOC]
+
+# spring源码
+
+-  **spring版本：5.3.10**
+-  预备要求：
+   -  会使用spring、springboot
+   -  了解常用的设计模式
+   -  了解基本的JVM知识
+   -  不只是看，自己也会动手研究源码
+-  **我自己也是初次研究，中间肯定会犯很多错误，希望大家多多指正**
+-  注意，我实际上是直接引入的springboot包，再由它引的spring，不过应该没啥大的区别
+
+## DIP、IOC、DI
+
+我们都知道spring中有个IOC，那么IOC到底是什么？
+
+在做这个解答之前，先说说DIP
+
+### DIP
+
+DIP：依赖倒置原则，是说
+
+1. 高层次的模块不应该依赖于低层次的模块，两者都应该依赖于抽象。
+
+   - 如果一个类A需要另一个类B帮忙完成一个事情，我们称B是低层次的（底层代码）。
+   - A将它的需求抽象C出来，B去实现这个抽象C，这使得A、B都依赖于C
+
+2. 抽象不应该依赖于具体。而具体则应该依赖于抽象。
+
+	- 依赖：如果A的功能需要B的存在，**这表明A依赖于B**。
+
+	- 示例代码：
+
+      ```java
+      public class DIPTest{
+        private final InterBase inter;
+        // constructor
+        public DIPTest(InterBase interImpl){
+            this.inter = interImpl; // InterImpl 实现了 InterBase
+        }
+      }
+      ```
+
+	- 上述代码中，DIPTest依赖InterBase来完成一些操作。但注意，InterBase是一个接口，所以这个依赖关系是**依赖抽象**而不是**依赖实现**。
+       - 如果一个抽象依赖了实现，一旦实现发生了变化，抽象也可能跟着有大变化。这种设计不仅违背了**开闭原则**，还违背了一般逻辑：**抽象居然由具体实现决定功能**，我这个人与别人交流用的是手机，当交流不用手机，我居然要修改一下DNA才会重新交流？
+       - 颠倒指的是颠倒了传统的软件设计对依赖的认知。
+
+**总结一下**：就是要面向抽象编程
+
+### IOC
+
+IOC（Inversion of Control，控制反转）指的是原来应该由自己控制的东西被第三方控制。
+
+以模板方法模式为例：
+
+```java
+public abstract class TwoStep {
+    public void doSome() {
+        step1();
+        step2();
+    }
+
+    protected abstract void step1();
+
+    protected abstract void step2();
+
+}
+```
+
+这个TwoStep的doSome()调用之后到底发生了什么，完全不由TwoStep自己决定，由此**流程**的控制被子类实现，符合了IOC的情形。
+
+再回过头来，Spring在控制上做了以下2件事：
+
+1. 创建bean于Spring自己的IOC容器中。
+2. 从IOC容器中将beanA注入到依赖于beanA的beanB里。
+
+即是说，Spring控制的是beanB获得依赖的过程（不再由我们自己在什么地方实例化再注入进去）
+
+所以Spring的IOC也会被人称为DI（**依赖注入**）。
+
+由此也可以得出一个结论：DIP和IOC并没有什么直接的联系，在IOC之前提一嘴DIP是因为网上很多人将他们扯在一起。不过一个基于IOC的框架或者代码如果设计上没有遵循DIP，能不能搞出来都是个问题。
+
+### DI
+
+DI（Dependency Injection，依赖注入）在Spring中被大量应用。构造器注入、setter注入、接口注入等方式这里不提及，只说DI的优势就在于可以很好的**解耦**。
+
+下面我们就直接进入正题吧。
+
+## Spring-IOC
+
+上面我们说过Spring的DI做了3件事：
+
+1. 创建IOC容器
+2. 注册bean
+3. 完成bean之间的依赖关系
+
+现在我们就跳过很多细节，先对Spring的内容有个大致的了解。对于很多代码细节，我们将在Spring-Details中进行补全。这里有一些细节：
+
+1. 前期会很仔细地分析很多过程性的内容，这是为熟悉Spring代码风格和我自己阅读源码方式打基础。
+   1. 注释一半来自翻译，但有些时候也会加上我的一些理解
+   2. 所有没有写在代码块的方法我基本都是忽略了参数
+2. 从2.4节开始将会把注意更多的放在一些重要内容上，一些过程上的内容就大家应该能够自己分析了。
+3. 所有设计到的设计模式，我只点出名字，不会在这里细讲
+4. 使用的IDE是IDEA，几乎所有快捷键都是默认快捷键
+
+### **一、创建IOC容器**
+
+#### 1.1 IOC容器在哪个类
+
+首先我们要搞明白作为IOC容器的类到底是那个类，为此我们得追寻Spring的启动代码
+
+- 启动Spring的方式很多，随便选择一个就可以，这里就以`public AnnotationConfigApplicationContext(Class<?>... componentClasses)-`为例
+
+```java
+// bean对应的类，使用了Lombok的注解@Data
+@Data
+public class BeanWithId {
+    private String id;
+}
+
+```
+
+```java
+// 注册bean
+public class SpringConfig {
+    @Bean
+    public BeanWithId normalBean() {
+        BeanWithId beanWithId = new BeanWithId();
+        beanWithId.setId("first bean");
+        return beanWithId;
+    }
+}
+```
+
+```java
+// 启动Spring
+public class Context {
+    public static void main(String[] args) {
+        // 这个构造方法会将SpringConfig注入到容器中，当然@Bean注解返回的BeanWithId也注入进入了（为什么可以以后再说）
+        AnnotationConfigApplicationContext applicationContext = new AnnotationConfigApplicationContext(SpringConfig.class);
+        Object normalBean = applicationContext.getBean("normalBean");
+        if (normalBean instanceof BeanWithId) {
+            BeanWithId realBean = (BeanWithId) normalBean;
+            String id = realBean.getId();
+            System.out.println("id = " + id);	// id = first bean
+        }
+    }
+}
+
+```
+
+**这份代码将会狠狠地跟着源码解析，我自己都没想到**
+
+现在整体上看一下AnnotationConfigApplicationContext这个类的UML图（IDEA快捷键：`ctrl+shift+alt+U`）
+
+![AnnotationConfigApplicationContext-uml](./AnnotationConfigApplicationContext-uml.png)
+
+观察uml图，注意到有个叫做`ApplicationContext`的接口继承了很多其他接口。这说明该接口汇聚了很多功能于一身，应该是一个**中心接口**，说什么都要点进去看看。进去一看注释，好家伙，啥都写出来了：
+
+An ApplicationContext provides:
+<ul>
+<li>Bean factory methods for accessing application components.
+Inherited from {@link org.springframework.beans.factory.ListableBeanFactory}.
+<li>The ability to load file resources in a generic fashion.
+Inherited from the {@link org.springframework.core.io.ResourceLoader} interface.
+<li>The ability to publish events to registered listeners.
+Inherited from the {@link ApplicationEventPublisher} interface.
+<li>The ability to resolve messages, supporting internationalization.
+Inherited from the {@link MessageSource} interface.
+<li>Inheritance from a parent context. Definitions in a descendant context
+will always take priority. This means, for example, that a single parent
+context can be used by an entire web application, while each servlet has
+its own child context that is independent of that of any other servlet.
+</ul>
+
+其中，第一条提到ApplicationContext的实现要提供：
+
+> `ListableBeanFactory`中定义的，**访问应用组件的方法**（意译的）
+
+这里**应用组件**指的就是bean，所以ApplicationContext提供了访问bean的方法，而这些方法在`ListableBeanFactory`接口中被定义。
+
+看一下`ListableBeanFactory`，随便找个访问方法，比如第一个的`boolean containsBeanDefinition(String beanName);`。看一下它是如何实现这个方法来访问到IOC容器的，查看UML里最近的实现在`AbstractApplicationContext`里面。
+
+```java
+	@Override
+	public boolean containsBeanDefinition(String beanName) {
+		return getBeanFactory().containsBeanDefinition(beanName);
+	}
+	// getBeanFactory()是一个抽象方法
+	@Override
+	public abstract ConfigurableListableBeanFactory getBeanFactory() throws IllegalStateException;
+```
+
+`ConfigurableListableBeanFactory`继承自`ListableBeanFactory`，**基本可以肯定IOC容器就是实现了`BeanFactory`接口的类**（`BeanFactory`是`ListableBeanFactory`的父接口），再看一下`ConfigurableListableBeanFactory`的实现，唯一实现是`DefaultListableBeanFactory`。在Spring中，`DefaultListableBeanFactory`就是默认的IOC容器。
+
+**可以注意到的设计模式**：
+
+1. BeanFactory从名字来看应该使用了**工厂方法**，事实上也确实如此：
+
+   ```java
+   	Object getBean(String name) throws BeansException;
+   	<T> T getBean(String name, Class<T> requiredType) throws BeansException;
+   	Object getBean(String name, Object... args) throws BeansException;
+   	<T> T getBean(Class<T> requiredType) throws BeansException;
+   	// ...
+   ```
+
+2. 在`AbstractApplicationContext`里面，使用获取`BeanFactory`的办法是调用了
+
+   `public abstract ConfigurableListableBeanFactory getBeanFactory() throws IllegalStateException;`这是**模板方法**设计模式，如何获取beanFactory交由子类自由实现
+
+3. 注意到`ApplicationContext`子类（`AbstractRefreshableApplicationContext`、`GenericApplicationContext`）实现`ListableBeanFactory`接口的方式是采用委托的方式，即在这些实现类里持有`ListableBeanFactory`的默认实现`DefaultListableBeanFactory`，所有的方法都丢给这个默认实现来完成。
+
+   ```java
+   	//---------------------------------------------------------------------
+   	// Implementation of BeanFactory interface
+   	//---------------------------------------------------------------------
+   
+   	@Override
+   	public Object getBean(String name) throws BeansException {
+   		assertBeanFactoryActive(); // 验证生命周期的方法
+   		return getBeanFactory().getBean(name); // 获得beanFactory并且调用它的getBean()方法，这就是委托
+   	}
+   //.......
+   ```
+
+   这个是典型的**装饰器模式**，方便拓展
+   
+4. `ApplicationContext`继承了很多接口，集成了所有功能且对外提供自己，这是**外观模式**，减少复杂性且封装了内层，方便维护和基于此接口的开发。
+
+#### 1.2 BeanFactory
+
+既然清楚了实现`BeanFactory`接口的就是IOC容器，且Spring默认该实现类为`DefaultListableBeanFactory`。现在我们先来深入研究一下`BeanFactory`。
+
+进入到该类，先看**注释**。
+
+注释很长，总结一下说了这几件事：
+
+1. 是访问bean容器（也就是IOC容器）的根接口，被持有一系列`bean definition`（bean定义）的类实现。
+
+   - 注意，这个接口只定义了**访问的方法**，他要求实现这个接口的类**必须可以持有一系列的bean定义**。
+
+   - 这些bean定义之间由`String name`区分
+   - 根据`bean factory`的配置，每次`getBean()`返回的可能是不同的实例、也可能是同一个实例
+   - 依赖注入优于自己去容器里面找相应的bean（就是平时使用的时候尽量不要自己调用`getBean()`)
+
+2. `BeanFactory`是最基本的接口，一些特殊的功能在子接口中添加：
+
+   - `ListableBeanFactory`提供枚举所有bean定义的功能，所有实现提前加载bean定义功能的`beanFactory`应该实现这个接口。
+
+     - 无论是以xml配置，还是注解配置，都是在系统启动时提前加载的，所以大部分我们用到的spring应用其`beanFactory`都至少实现了这个接口
+     - `ApplicationContext`接口也继承了这个接口
+
+   - `HierarchicalBeanFactory`将`BeanFactory`变成了层级结构，`BeanFactory`可以有父`BeanFactory`
+
+     - 设置父`BeanFactory`的方法在子类`ConfigurableBeanFactory`中被**定义**。这说明仅实现`HierarchicalBeanFactory`的类只能通过**构造函数**设置父容器，并且一旦设置就不能再变。
+
+       - 在子接口`ConfigurableBeanFactory`的`setParentBeanFactory()`方法注释上强调了
+
+         > 只有在构造该容器父容器不可用时，才允许在构造方法外调用这个方法，并且一点绑定就不允许再改变
+
+     - 实现了该接口的`BeanFactory`如果找不到相应名称的bean时，应该继续委托给父类查找
+
+     - 一个经典的应用就是Spring和SpringMVC父子容器
+
+3. **提供了一套bean标准的初始化方法和顺序**，并且要求`BeanFactory`**尽可能**地实现这些方法。
+
+**这里面提到了一个东西：`bean definition`。根据注释，这些bean定义一般来自于程序外部的配置源（比如我们熟悉的xml文档），而`beanFactory`的职责是在必要的时候以其为原型，返回它的bean实例（不是返回bean定义，换句话说bean定义的管理与该接口无关）。**
+
+到此，我们大致知道了`BeanFactory`的职责，自然而然地我们会想IOC容器到底是什么数据结构？怎么创建初始化的？注意到这些问题已经涉及到具体的逻辑和算法了，接下来我们将回到最开始的代码，跟着断点一步一步走下去。
+
+此外，与主线“IOC容器”不相关的问题我们将其暂时搁置（bean定义是如何加载的？相互之间的依赖又是如何注入的？等等等）。
+
+**可以注意到的设计模式**：
+
+- `BeanFactory`持有的是bean定义，是bean的原型，这很显然地用了**原型模式**。
+
+#### 1.3 IOC容器在哪里创建
+
+回到最开始的代码，在
+
+```java
+AnnotationConfigApplicationContext applicationContext = new AnnotationConfigApplicationContext(SpringConfig.class);
+```
+
+打上断点，debug启动F7一步一步看看它到底做了什么。虽然这么说，我们也要详略得当，一些边边角角的内容就不谈，比如一开始的是否忽略SpEL表达式。
+
+直接快进到构造函数（按住F7不要停）
+
+```java
+public AnnotationConfigApplicationContext(Class<?>... componentClasses) {
+	this();	// 无参构造方法
+	register(componentClasses); // 注册参数中的bean
+	refresh();    // 来了，refresh方法，之后详解
+}
+```
+
+构造函数长成这样，看到第二行：`register(componentClasses)`。这个方法名和参数告诉我们这是在向IOC注册bean了。所以，**IOC容器必须在`this();`里创建完毕！**继续看下去，我们都知道，`this();`里面第一句隐式地调用了`super();`
+
+继续F7，果然调用了`GenericApplicationContext`的构造方法：
+
+```java
+public GenericApplicationContext() {
+	this.beanFactory = new DefaultListableBeanFactory();	// 创建IOC容器了，当然此时还没有调用这个方法，先走super();
+}
+```
+
+然而，它还有父类，继续F7
+
+```java
+public AbstractApplicationContext() {
+	this.resourcePatternResolver = getResourcePatternResolver();	// 模板方法，初始化一个解析器，它的默认实现也在这个类里面。当然此时还没有调用这个方法，先走super();
+}
+```
+
+最后一个待被初始化的父类:`DefaultResourceLoader`。
+
+从名称和注释可以看出来，这个类是一个用于加载程序外部资源的类，可以猜测这个类可以用于读取在外部的bean定义（比如xml文档）。只是现在和我们的主线无关，先把这个类放放。
+
+继续F7发现回到了`AbstractApplicationContext`并且开始初始化，嗯终于没有父类需要初始化了。现在我们来看看初始化了哪些字段：
+
+```java
+protected final Log logger = LogFactory.getLog(getClass());		// 日志
+private String id = ObjectUtils.identityToString(this);			// 一个标志
+private String displayName = ObjectUtils.identityToString(this);// 一个标志
+private final List<BeanFactoryPostProcessor> beanFactoryPostProcessors = new ArrayList<>();	// bean定义后处理器,之后细谈
+private final AtomicBoolean active = new AtomicBoolean();	//	状态标志
+private final AtomicBoolean closed = new AtomicBoolean();	//	状态标志
+private final Object startupShutdownMonitor = new Object();	//	锁
+private ApplicationStartup applicationStartup = ApplicationStartup.DEFAULT;	//	程序启动时的阶段标志器
+private final Set<ApplicationListener<?>> applicationListeners = new LinkedHashSet<>();	//	监听器
+private ResourcePatternResolver resourcePatternResolver = getResourcePatternResolver();// 在构造函数中初始化了一个解析器
+```
+
+感觉这些东西和IOC创建还是没有啥关系（毕竟没有涉及到`BeanFactory`，`beanFactoryPostProcessors`已经是后置处理beanFactory的东西了）
+
+只好继续执行下去，回到`GenericApplicationContext`看看都初始化了些啥
+
+```java
+private boolean customClassLoader = false;		// 默认没有使用自定义ClassLoader加载资源
+private final AtomicBoolean refreshed = new AtomicBoolean();	//	一个标志
+this.beanFactory = new DefaultListableBeanFactory();	// 	构造方法中初始化了beanFactory
+```
+
+终于，我们在`GenericApplicationContext`找到了IOC容器创建的地方和相应的实体类`DefaultListableBeanFactory`，它持有这个IOC容器。
+
+#### 1.4 容器的真身
+
+为了找到容器到底在这个类的哪里，和之前一样，先看`DefaultListableBeanFactory`的UML类图：
+
+![DefaultListableBeanFactory-uml](./DefaultListableBeanFactory.png)
+
+注意到这个类确实实现了`BeanFactory`接口，而且还实现了它的所有直接子接口（感兴趣的话可以去看看这些接口都加了什么性质）。另一边它又实现了`SingletonBeanRegistry`,`AliasRegistry`两个接口。这两个接口看名字和**注册**相关，是很重要的接口，但现在和主线无关的一律全丢掉。
+
+发现如果继续F7跟着父实现走一遍，有很多个字段需要看是不是容器，这会非常的耗时，这里不妨换一个方法：
+
+1. `getBean()`方法一定要访问IOC容器，按照源码走一遍
+2. `AnnotationConfigApplicationContext`的有参构造方法里，有一个`register()`方法，它一定会访问容器，可以跟着走一遍
+3. 按照自己的理解，所谓容器应该是一个`Collection`，并且每个bean定义都有其对应的name，合理推断这个`Collection`应该是个`Map<String,X>`，字段只看`map`就行了。（这里的X指的是不清楚是什么具体泛型，不是这个Map声明的泛型为X）
+
+不论那种方法都可以找到具体的容器是哪一个，不过到此为止我们还没分析过注册过程，所以这里就已1，3为例子带着大家分析一下。
+
+- 第三种方法：
+  1. 打开`Structure`（快捷键：`alt+7`），`show fileds`看一下从`DefaultListableBeanFactory`到其父类的所有字段
+
+  2. 找到所有和bean相关的map属性，再阅读相关注释就可以挑选出容器：
+
+     ```java
+     private final Map<String, BeanDefinition> beanDefinitionMap = new ConcurrentHashMap<>(256);	// ?是BeanDefinition
+     ```
+
+- 第一种方法：
+
+  1. 打开`Structure`，找到`getBean(String)`方法，发现它在`AbstractBeanFactory`里面，点开发现实际上调用了`doGetBean()`方法
+
+  2. 进入该方法，阅读源码。**很多时候好的命名就是注释，这一点我们在自己编程的时候就要尽量做到**。该方法主要做了这几件事：
+
+     1. 规范化beanName，这里涉及到`FactoryBean`（和`BeanFactory`不同，之后会谈）和别名问题，反正应该和容器无关
+
+     2. 看到`getSingleton(beanName);`但是注意上面的注释：`cache for manually registered singletons`，手动注册的单例，这应该不是我们要找的，继续往下看。
+
+     3. 跳过明显不是容器相关的方法，定位到
+
+        ```java
+        StartupStep beanCreation = this.applicationStartup.start("spring.beans.instantiate").tag("beanName", name);
+        ```
+
+        `applicationStartup`之前提到过，是启动过程中阶段的标志器，现在它标志为bean的初始化。继续往下看
+
+     4. 发现后面只有一个`RootBeanDefinition`和`Bean`有关系，点进去看看，它持有一个`BeanDefinitionHolder`，而`BeanDefinitionHolder`又持有`BeanDefinition`。从名字上就可以确认这个`BeanDefinition`就是容器要存的类。
+
+     5. 跟进`getMergedLocalBeanDefinition()`
+
+        ```java
+        protected RootBeanDefinition getMergedLocalBeanDefinition(String beanName) throws BeansException {
+        	RootBeanDefinition mbd = this.mergedBeanDefinitions.get(beanName);
+        	if (mbd != null && !mbd.stale) {
+        		return mbd;
+        	}
+        	return getMergedBeanDefinition(beanName, getBeanDefinition(beanName));
+        }
+        ```
+
+        先尝试从`mergedBeanDefinitions`中获得`RootBeanDefinition`但是如果没有获得会调用`getBeanDefinition(beanName)`。
+
+     6. 跟进`getBeanDefinition(beanName)`，它的实现回到了`DefaultListableBeanFactory`，从`beanDefinitionMap`中获取`BeanDefinition`，如果没有找到就直接抛异常了，所以可以确定容器就是
+
+        ```java
+        private final Map<String, BeanDefinition> beanDefinitionMap = new ConcurrentHashMap<>(256);
+        ```
+
+至此，我们终于发现容器就是`DefaultListableBeanFactory`里的`beanDefinitionMap`。
+
+但同时我们在一路上也发现了更多的问题：
+
+1. 什么是`ResourceLoader`，加载的`Resource`又是什么
+2. `bean`是什么时候、怎么注册进入容器的
+3. `BeanFactoryPostProcessor`又是啥...
+4. `BeanDefinition`的内部有什么内容
+5. `DefaultListableBeanFactory`其他的那么多属性又都是干什么的
+6. ......
+
+问题越来越多不要怕，这确实使得源码阅读更复杂，但只要坚持只走主线（只解决一个问题）的方针，这些问题都会变成一个个的方向来帮助我们更快的理解Spring。（我们最开始的主线就是找到IOC容器是什么）
+
+#### 1.5 小结
+
+1. 容器需要实现`BeanFactory`接口，但`beanFactory`接口只提供访问容器的方法。容器不仅要实现该接口，还要实现注册、管理bean定义的接口。后面这个接口在下一章出现。
+2. spring默认使用的容器是`DefaultListableBeanFactory`里的`beanDefinitionMap`。
+3. 容器里面装的不是bean，而是bean定义，**那么bean定义又从哪里来，怎么到bean的**，这就是下一章的主线。
+
+### **二、bean从何而来**
+
+#### 2.1 BeanDefinition和bean
+
+在之前关于容器的探索中，我们发现容器存储的并不是我们认为的bean实例(`Object`)，反而是一个叫做bean定义(`BeanDefinition`)的东西。它们之间到底有什么区别和联系呢？
+
+直接打开`BeanDefinition`的源码来看看，老规矩先看UML图……结果发现就只继承了2个顶级接口`AttributeAccessor`，`BeanMetadataElement`。前者定义了访问、附加属性于任意元数据的通用方法；后者是元数据实现的接口，并且提供它的配置源（我们最开始的代码bean实例`normalBean`的配置源就是`SpringConfig`类，可以debug去验证）
+
+再看注释：
+
+1. 一个bean定义描述了一个具有指定属性值、构造参数值、和其他信息（由bean定义子类添加）的bean实例
+   - 描述语义上是用一套**方式**来**解释说明**某个东西，只要某人对这套方式熟悉，那么就可以更轻松地理解这个东西
+     - 严格地说，描述应当是一个等价关系，如果A描述了B，那么A一定要等价于B，不然还描述了个什么？
+     - 所以，一个bean定义至少拥有一个bean的全部信息
+     - 所以称描述了bean实例所有属性的类为bean定义是很恰当的名称
+2. 是最小的一个接口，主要目的是允许`BeanFactoryPostProcessor`访问并修改描述的属性值，以及其他bean的元数据
+
+**所以BeanDefinition是某个bean实例的原型（元数据），只是它可以被BeanFactoryPostProcessor修改，修改后这个bean定义就描述另一个bean实例了**。
+
+现在我们来看看这个接口都有哪些方法：
+
+1. 定义了2种scope常量：
+
+   ```java
+   	String SCOPE_SINGLETON = ConfigurableBeanFactory.SCOPE_SINGLETON;	// 就是 "singleton"，单例
+   	String SCOPE_PROTOTYPE = ConfigurableBeanFactory.SCOPE_PROTOTYPE;	// 就是 "prototype"，多例
+   ```
+
+2. 定义了3种角色常量：
+
+   ```java
+   int ROLE_APPLICATION = 0;		// 程序用的一般bean，我们最经常用的@Bean，@Component注册进来的就是这个角色
+   int ROLE_SUPPORT = 1;			
+   int ROLE_INFRASTRUCTURE = 2;
+   ```
+
+3. 定义了一些可被修改属性的方法：
+
+   - parentName：父子bean中的父bean定义名字，还记得xml中的父子bean吗，在注解注册过程中也是可以配置这个属性的
+
+   - beanClassName：类名
+
+   - scope：单例还是多例
+
+   - lazyInit：懒加载
+
+   - dependsOn：依赖类，这些类要先于该类初始化
+
+   - autowireCandidate：是否在按类型注入时忽略这个bean
+
+   - primary：是否优先注入这个bean
+
+   - factoryBeanName：factoryBean的名字（注意不是之前提到的BeanFactory）
+
+   - factoryMethodName：工厂创建bean的方法名。
+
+     - `factoryBean`，是一个**工厂bean**。首先它是一个工厂类，可以用于创建类的实例（工厂模式）；其次它是一个`bean`，会被注入到容器中。但是它创建的实例却**不会**被注入到容器中。
+
+     - 既然它是一个bean，那它对应的类就需要我们自己实现
+
+     - 既然它是一个工厂，他就具有所有工厂都有的优点，特别的，这个工厂允许我们自由地对实例进行一些操作（代理之类的）
+
+     - 当容器`getBean`用`factoryBean`的`beanName`或者待创建的实例类的class类来获取的时候，会获得这个`factoryBean`创建的实例
+
+     - 如果要获取`factoryBean`本身，需要在`beanName`前面加上`&`
+
+       ```java
+       public class BeanWithIdFactory implements FactoryBean<BeanWithId> {
+           // 实现FactoryBean接口
+           @Override
+           public BeanWithId getObject() throws Exception { // 工厂方法获取实例
+               BeanWithId beanWithId = new BeanWithId();
+               beanWithId.setId("from factory");
+               return beanWithId;
+           }
+       
+           @Override
+           public Class<?> getObjectType() {
+               return BeanWithId.class;
+           }
+       
+           @Override
+           public boolean isSingleton() { // 不是单例，如果这里是true，那么每次返回的都是同一个实例，即使getObject里面是new出来的
+               return false;
+           }
+       }
+       // 这个使用方式不是很有用，可以看看别的框架如何使用这个接口的，比如mybatis
+       ```
+
+       ```java
+       public class Context {
+           public static void main(String[] args) throws Exception {
+               AnnotationConfigApplicationContext applicationContext = new AnnotationConfigApplicationContext(BeanWithIdFactory.class);	// 将工厂注册成为bean
+               // 也可以直接用BeanWithId.class当参数传入getBean()方法
+               Object beanWithIdFactory = applicationContext.getBean("beanWithIdFactory");
+               Object beanWithIdFactoryAnother = applicationContext.getBean("beanWithIdFactory");
+       
+               if (beanWithIdFactory instanceof BeanWithId) { // getBean返回的是工厂产生的实例而不是工厂本身
+                   BeanWithId beanWithId = (BeanWithId) beanWithIdFactory;
+                   BeanWithId beanWithIdAnother = (BeanWithId) beanWithIdFactoryAnother;
+                   System.out.println(beanWithId.getId()); // from factory
+                   System.out.println(beanWithIdAnother == beanWithId); // false 不是单例
+               }
+               Object factory = applicationContext.getBean("&beanWithIdFactory"); // 加上&来获取这个factoryBean
+               if (factory instanceof BeanWithIdFactory) {
+                   System.out.println("I am factory bean");	// 确实打印出来了
+               }
+           }
+       }
+       // 中间可以打一个断点，我们已经知道容器是applicationContext-->beanFactory-->beanDefinitionMap，可以看一下长啥样
+       ```
+
+   - constructorArgumentValues：构造函数参数
+
+   - propertyValues：属性值
+
+   - initMethodName：初始化方法名
+
+   - destroyMethodName：销毁方法名
+
+   - role：角色，就是上面3种常量之一
+
+   - description：注释
+
+4. 定义了一些只读属性的方法：
+
+   - resolvableType：类型信息，获取超类、接口、泛型可用它
+   - singleton/prototype：是否单例/多例
+   - isAbstract：是否是抽象的
+   - getResourceDescription：获取该bean定义所属资源的描述
+   - getOriginatingBeanDefinition：获取bean定义的原始定义（暗示可以对定义作装饰，添加内容）
+
+方法很多，我大致简单的解释了一下，可以随意看看注释，想一想有些方法存在的意义。
+
+至此，我们搞明白了`BeanDefinition`和`bean`之间的关系以及`BeanDefinition`所具有的属性方法。也清楚了现在的一个过程是`BeanDefintion-->Bean`：**bean从BeanDefintion而来**。
+
+#### 2.2 BeanDefintion如何被创建
+
+接上文，现在我们的目标就是`BeanDefintion`从哪里来的。在[1.2 beanFactory](#1.2 BeanFactory)一节里，我们提到过
+
+> 这里面提到了一个东西：`bean definition`。根据注释，这些bean定义一般来自于程序外部的配置源（比如我们熟悉的xml文档），而`beanFactory`的职责是储存这些定义，并且在必要的时候以其为原型，返回它的bean实例。
+
+这个说法比较抽象，我们并不清楚到底是如何进入程序并转为BeanDefintion，这一节我们就来追踪这个问题。具体实现，我们就断点跟踪代码。不过我们可以先猜测一下：
+
+- 最早的时候我们使用`spring.xml`来定义`bean`，那么Spring肯定是把这个xml文档以流的形式加载进来，然后注册
+- 之后我们开始注解开发，以springboot为例，`@ComponentScan`还是会扫描包内部的class文件加载，有`@Component`这类注解的类会注册为`beanDefinition`
+- 以本文代码为例[1.1 IOC容器在哪个类](#1.1 IOC容器在哪个类)，这种构造函数直接注册类也是可以的——>他没有进行外部扫描。
+  - 但是也有扫描包的构造方法`public AnnotationConfigApplicationContext(String... basePackages) `
+
+既然`AnnotationConfigApplicationContext`哪种都能进行，我们依旧选择之前的代码进行跟踪。在之前跟踪寻找容器的过程中，我们跟着到了`GenericApplicationContext`的构造函数里面，创建了`DefaultListableBeanFactory`。这次从这里继续，而上次我们刚好走完了`AnnotationConfigApplicationContext`里无参构造函数的`super()`
+
+```java
+public AnnotationConfigApplicationContext(Class<?>... componentClasses) {
+	this();
+	register(componentClasses);
+	refresh();
+}
+
+public AnnotationConfigApplicationContext() {
+    // super();    <-- 隐式调用,上次刚好到这个地方结束
+	StartupStep createAnnotatedBeanDefReader = this.getApplicationStartup().start("spring.context.annotated-bean-reader.create"); 		// 应该记住了，StartupStep是启动过程中的阶段标志，这里是标志开始创建AnnotatedBeanDefinitionReader。
+	this.reader = new AnnotatedBeanDefinitionReader(this);
+	createAnnotatedBeanDefReader.end();
+	this.scanner = new ClassPathBeanDefinitionScanner(this);
+}
+```
+
+可以看到，无参构造函数里面初始化了一个reader，一个scanner。看名字，`AnnotatedBeanDefinitionReader`是和注解注册`BeanDefinition`有关的类，`ClassPathBeanDefinitionScanner`是和扫描注册`BeanDefinition`有关的类，这不得仔细看看。
+
+**题外话，再一次强调好的命名就是最好的注释，大家平时码代码的时候，如果写了行内注释，这就是提醒你可以抽出部分代码为private方法，用一个好的命名来解释它要干的事。**
+
+直接跟进`AnnotatedBeanDefinitionReader`构造函数，并先看注释
+
+```java
+	// AnnotatedBeanDefinitionReader
+	/**
+	 * Create a new {@code AnnotatedBeanDefinitionReader} for the given registry.
+	 * <p>If the registry is {@link EnvironmentCapable}, e.g. is an {@code ApplicationContext},
+	 * the {@link Environment} will be inherited, otherwise a new
+	 * {@link StandardEnvironment} will be created and used.
+	 * @param registry the {@code BeanFactory} to load bean definitions into,
+	 * in the form of a {@code BeanDefinitionRegistry}
+	 * @see #AnnotatedBeanDefinitionReader(BeanDefinitionRegistry, Environment)
+	 * @see #setEnvironment(Environment)
+	 */
+	public AnnotatedBeanDefinitionReader(BeanDefinitionRegistry registry) {
+		this(registry, getOrCreateEnvironment(registry));
+	}
+```
+
+注意到注释里面重量级的这句话：
+
+> @param registry the BeanFactory to load bean definitions into, in the form of a BeanDefinitionRegistry
+
+这是在告诉我们参数`BeanDefinitionRegistry`的作用：registry以`BeanDefinitionRegistry`的形式将`bean definitions`加载进`beanFactory`。
+
+另一边`ClassPathBeanDefinitionScanner`的构造函数中的注释，也有相应的这句话：
+
+```java
+	// ClassPathBeanDefinitionScanner
+	/**
+	 * Create a new {@code ClassPathBeanDefinitionScanner} for the given bean factory.
+	 * @param registry the {@code BeanFactory} to load bean definitions into, in the form
+	 * of a {@code BeanDefinitionRegistry}
+	 */
+	public ClassPathBeanDefinitionScanner(BeanDefinitionRegistry registry) {
+		this(registry, true);
+	}
+```
+
+还记得在beanFactory一节中提到的`beanFactory`仅仅提供访问bean的方法，管理bean定义的方法在其他地方。现在我们知道了，`BeanDefinitionRegistry`就是来搞注册bean定义的，是将`beanDefinition-->bean`的具体实现类。
+
+此外，这俩构造函数的参数都是`this`（`AnnotationConfigApplicationContext`）。再次拿出我们的UML图，发现实现`BeanDefinitionRegistry`接口的是`GenericApplicationContext`那么可以猜测，注册进`beanFactory`的方法是在`GenericApplicationContext`中实现的（事实上是委托给`DefaultListableBeanFactory`）。
+
+```java
+	this.reader = new AnnotatedBeanDefinitionReader(this);
+	this.scanner = new ClassPathBeanDefinitionScanner(this);
+```
+
+不过我们的主线是搞明白BeanDefinition的创建，所以这部分我们留在后面详谈，现在有个印象就好。
+
+继续看`AnnotatedBeanDefinitionReader`和`ClassPathBeanDefinitionScanner`类上面的注释：
+
+1. `ClassPathBeanDefinitionScanner`:给`beanFactory`或`ApplicationContext`注册bean定义的类
+   - 默认扫描带`@Component`注解的类（`@Repository`、`@Service`、`@Controller`都继承了`@Component`，也会被扫描到）。
+   - `@ManagedBean`（Java EE6的）、`@Named`（JSR-330的）两个注解也会被注册进来。
+2. `AnnotatedBeanDefinitionReader`：也是一个给容器注册`beanDefinition`的类，不过只处理显式注册且用注解开发的情形
+   - 所谓显式注册，就是像之前调用构造函数注册或者用`AnnotationConfigApplicationContext#register()`注册的类，它们都是程序手动注册
+
+我们继续跟进源码，`this();`初始化了2个注册`beanDefinition`的类。接下来根据不同的构造函数调用不同的方法：
+
+- `public AnnotationConfigApplicationContext(Class<?>... componentClasses)`走的是`register(componentClasses);`方法，是显式注册bean定义，所以应该是调用`AnnotatedBeanDefinitionReader`做注册的事，跟进去看看
+
+  ```java
+  	@Override
+  	public void register(Class<?>... componentClasses) {
+  		Assert.notEmpty(componentClasses, "At least one component class must be specified");
+  		StartupStep registerComponentClass = this.getApplicationStartup().start("spring.context.component-classes.register")
+  				.tag("classes", () -> Arrays.toString(componentClasses));
+  		this.reader.register(componentClasses);
+  		registerComponentClass.end();
+  	}
+  ```
+
+  四行代码，一行验证参数，两行标志阶段，所以真正有用的就是`this.reader.register(componentClasses);`，直接跟进去
+
+  ```java
+  	public void register(Class<?>... componentClasses) {
+  		for (Class<?> componentClass : componentClasses) {	// 遍历注册组件
+  			registerBean(componentClass);
+  		}
+  	}
+  
+  	public void registerBean(Class<?> beanClass) {
+  		doRegisterBean(beanClass, null, null, null, null); 	// 真正注册的方法，注意除了beanClass其他参数全是null
+  	}
+  ```
+
+  没什么说的，继续跟进，接下来的方法有些长，不过耐心一点，慢慢看其实很好懂的，我也会加上一些注释的
+
+  ```java
+  /*
+  先看方法注释，每个参数写的很清楚了是干什么的
+  beanClass：bean的类
+  name：bean的名字
+  qualifiers： 处理autowire限制符注解
+  supplier：创建实例的方法，如果bean定义设置了这个将会忽略factoryBean，直接以supplier返回的实例为bean（Supplier<T> 标准函数式接口，可以了解一下）
+  			这么做的好处是不需要反射调用，提高性能。可以跟踪getBean()方法看看在哪里调用这个supplier
+  customizers：自定义修改该bean定义的东西
+  */	
+  private <T> void doRegisterBean(Class<T> beanClass,
+                                  @Nullable String name,
+                                  @Nullable Class<? extends Annotation>[] qualifiers,
+                                  @Nullable Supplier<T> supplier,
+                                  @Nullable BeanDefinitionCustomizer[] customizers) {
+  
+  		AnnotatedGenericBeanDefinition abd = new AnnotatedGenericBeanDefinition(beanClass); // 直接new一个bean定义
+  		if (this.conditionEvaluator.shouldSkip(abd.getMetadata())) {	// 注解@Conditional的处理，不满足的就不注册了
+  			return;
+  		}
+  
+  		abd.setInstanceSupplier(supplier);	// 加入supplier
+  		ScopeMetadata scopeMetadata = this.scopeMetadataResolver.resolveScopeMetadata(abd);// 处理@Scope注解
+  		abd.setScope(scopeMetadata.getScopeName());
+  		String beanName = (name != null ? name : this.beanNameGenerator.generateBeanName(abd, this.registry));
+  
+  		AnnotationConfigUtils.processCommonDefinitionAnnotations(abd);// 处理@Lazy、@DependsOn等常用注解。
+  		if (qualifiers != null) {	// 一些bean在autowire的时候有特殊的行为，就在这里处理（比如@Qualifier)
+  			for (Class<? extends Annotation> qualifier : qualifiers) {
+  				if (Primary.class == qualifier) {
+  					abd.setPrimary(true);
+  				}
+  				else if (Lazy.class == qualifier) {
+  					abd.setLazyInit(true);
+  				}
+  				else {
+  					abd.addQualifier(new AutowireCandidateQualifier(qualifier));
+  				}
+  			}
+  		}
+  		if (customizers != null) {	// 最后自定义地处理bean定义
+  			for (BeanDefinitionCustomizer customizer : customizers) {
+  				customizer.customize(abd);
+  			}
+  		}
+  
+  		BeanDefinitionHolder definitionHolder = new BeanDefinitionHolder(abd, beanName); // 创建对应的BeanDefinitionHolder
+  		definitionHolder = AnnotationConfigUtils.applyScopedProxyMode(scopeMetadata, definitionHolder, this.registry);// 是否使用代理（通用的默认为不创建）
+  		BeanDefinitionReaderUtils.registerBeanDefinition(definitionHolder, this.registry);// 向registry注册这个bean定义
+  	}
+  ```
+
+  可以看到，注册一个bean定义之前居然做了这么多处理，主要是处理一些注解和一些回调方法。**此外，真正向beanFactory注册bean定义的类居然是BeanDefinitionHolder。**
+
+  接下来看看扫描注册的过程：
+
+- `public AnnotationConfigApplicationContext(String... basePackages)`调用的是`scan(basePackages);`扫描传入的`basePackages`。跟进源码看看
+
+  ```java
+  	@Override
+  	public void scan(String... basePackages) {
+  		Assert.notEmpty(basePackages, "At least one base package must be specified");
+  		StartupStep scanPackages = this.getApplicationStartup().start("spring.context.base-packages.scan")
+  				.tag("packages", () -> Arrays.toString(basePackages));
+  		this.scanner.scan(basePackages);
+  		scanPackages.end();
+  	}
+  ```
+  
+  老样子，只有`this.scanner.scan(basePackages);`有用
+  
+  ```java
+  	public int scan(String... basePackages) {
+  		int beanCountAtScanStart = this.registry.getBeanDefinitionCount(); // 现有bean定义数
+  		doScan(basePackages);	// 扫描！
+  		if (this.includeAnnotationConfig) { // 标志是否使用内置的注解处理器
+  			AnnotationConfigUtils.registerAnnotationConfigProcessors(this.registry);	// 注册一些常见注解（@Configuration、@Bean等）的处理器，这样这些注解才会生效
+  		}
+  		return (this.registry.getBeanDefinitionCount() - beanCountAtScanStart); // 返回新注册的bean数量
+  	}
+  ```
+  
+  继续跟进
+  
+  ```java
+  	protected Set<BeanDefinitionHolder> doScan(String... basePackages) {
+  		Assert.notEmpty(basePackages, "At least one base package must be specified");	// 判空
+  		Set<BeanDefinitionHolder> beanDefinitions = new LinkedHashSet<>();
+  		for (String basePackage : basePackages) {
+  			Set<BeanDefinition> candidates = findCandidateComponents(basePackage);	// 扫描包，返回bean定义
+  			for (BeanDefinition candidate : candidates) {	// 后面都是对bean定义的一些处理，和doRegisterBean类似。
+  				ScopeMetadata scopeMetadata = this.scopeMetadataResolver.resolveScopeMetadata(candidate);
+  				candidate.setScope(scopeMetadata.getScopeName());
+  				String beanName = this.beanNameGenerator.generateBeanName(candidate, this.registry);
+  				if (candidate instanceof AbstractBeanDefinition) {
+  					postProcessBeanDefinition((AbstractBeanDefinition) candidate, beanName);
+  				}
+  				if (candidate instanceof AnnotatedBeanDefinition) {
+  					AnnotationConfigUtils.processCommonDefinitionAnnotations((AnnotatedBeanDefinition) candidate);
+  				}
+  				if (checkCandidate(beanName, candidate)) {
+  					BeanDefinitionHolder definitionHolder = new BeanDefinitionHolder(candidate, beanName);
+  					definitionHolder =
+  							AnnotationConfigUtils.applyScopedProxyMode(scopeMetadata, definitionHolder, this.registry);
+  					beanDefinitions.add(definitionHolder);
+  					registerBeanDefinition(definitionHolder, this.registry);// 注册
+  				}
+  			}
+  		}
+  		return beanDefinitions;
+  	}
+  ```
+
+好家伙，扫描的过程都在`findCandidateComponents()`方法里，而且最后注册的时候也是以`BeanDefinitionHolder`类的形式完成的。
+
+看来为了搞明白扫描的`BeanDefinition`来自哪里，我们还得去`findCandidateComponents()`里看看。
+
+```java
+	public Set<BeanDefinition> findCandidateComponents(String basePackage) {
+		if (this.componentsIndex != null && indexSupportsIncludeFilters()) { 
+            // 根据注释：spring5之后的新特性，扫描META-INF/spring.components里面定义的类，并且注入进来
+			return addCandidateComponentsFromIndex(this.componentsIndex, basePackage);
+		}
+		else {
+			return scanCandidateComponents(basePackage);
+		}
+	}
+```
+
+这里面有两条路，但逻辑上来说，不论走哪个if，basePackage下的类都是要被扫描的。我们更关心一般意义上的使用，所以spring5新特性的内容可以暂时跳过而选择`scanCandidateComponents()`方法。
+
+终于要到我们的终点了：
+
+```java
+private Set<BeanDefinition> scanCandidateComponents(String basePackage) {
+		Set<BeanDefinition> candidates = new LinkedHashSet<>();
+		try {
+			String packageSearchPath = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX +
+					resolveBasePackage(basePackage) + '/' + this.resourcePattern;
+			Resource[] resources = getResourcePatternResolver().getResources(packageSearchPath);
+			boolean traceEnabled = logger.isTraceEnabled();
+			boolean debugEnabled = logger.isDebugEnabled();
+			for (Resource resource : resources) {
+				if (traceEnabled) {
+					logger.trace("Scanning " + resource);
+				}
+				if (resource.isReadable()) {
+					try {
+						MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
+						if (isCandidateComponent(metadataReader)) {
+							ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);
+							sbd.setSource(resource);
+							if (isCandidateComponent(sbd)) {
+								if (debugEnabled) {
+									logger.debug("Identified candidate component class: " + resource);
+								}
+								candidates.add(sbd);
+							}
+							else {
+								if (debugEnabled) {
+									logger.debug("Ignored because not a concrete top-level class: " + resource);
+								}
+							}
+						}
+						else {
+							if (traceEnabled) {
+								logger.trace("Ignored because not matching any filter: " + resource);
+							}
+						}
+					}
+					catch (Throwable ex) {
+						throw new BeanDefinitionStoreException(
+								"Failed to read candidate component class: " + resource, ex);
+					}
+				}
+				else {
+					if (traceEnabled) {
+						logger.trace("Ignored because not readable: " + resource);
+					}
+				}
+			}
+		}
+		catch (IOException ex) {
+			throw new BeanDefinitionStoreException("I/O failure during classpath scanning", ex);
+		}
+		return candidates;
+	}
+```
+
+无视下面一大段的logger，我们专注于上半段，可以注意到其中核心的部分在于：
+
+```java
+Set<BeanDefinition> candidates = new LinkedHashSet<>();	// bean定义集合
+String packageSearchPath = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX +
+			resolveBasePackage(basePackage) + '/' + this.resourcePattern;	// 扫描路径
+Resource[] resources = getResourcePatternResolver().getResources(packageSearchPath);// 获取路径下的Resource
+for (Resource resource : resources) {	// 处理Resource，看是不是要被注册的类
+    if (resource.isReadable()) {
+        MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
+        if (isCandidateComponent(metadataReader)) {
+            ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader); // new一个bean定义
+			sbd.setSource(resource);
+			if (isCandidateComponent(sbd)) {
+                candidates.add(sbd);	// 添加进集合
+            }
+        }
+    }
+    return candidates;
+}
+```
+
+可以看到，扫描方式注册的Bean定义是`ScannedGenericBeanDefinition`类，并且是从`Resource`类转变过来的
+
+至此，我们分析了两种注册Bean定义的方式，并且更进一步地搞明白了`AnnotatedGenericBeanDefinition`的来源，如此我们从Bean定义到bean的图像可以进一步拓展为：
+
+```mermaid
+graph LR
+显式注册的类 --> AnnotatedGenericBeanDefinition --> BeanDefinitionHolder
+包路径 --> Resource --> MetadataReader --> ScannedGenericBeanDefinition --> BeanDefinitionHolder
+BeanDefinitionHolder -- BeanDefinitionRegistry注册 --> bean
+```
+
+为了解决bean从何而来的问题，我们还差`Resource`、`MetadataReader`、`BeanDefinitionHolder`三个类没有说，`BeanDefinitionRegistry`也只是简单提了一下。接下来我们就继续沿着主线搞明白这几个类。
+
+**可以注意到的地方**：
+
+1. 在处理Bean定义的时候，在自己的流程上面提供了很多回调方法（`AnnotatedGenericBeanDefinition`的`supplier`和`customizers`，`ScannedGenericBeanDefinition`也类似），这种处理方式非常适合模板方法模式、builder模式等有一套主流程的模式。好处是方便开发人员在自己这套流程上面最大化地拓展内容。
+2. 发现Spring将解耦解的非常开：`BeanFactory`和`BeanDefinitionRegistry`共同完成了容器的读与写，而且beanName也经常是从`beanNameGenerator`这个类来得到，别名注册有接口`AliasRegistry`等等
+   - 好处是：拓展性极强，可以很好的维护更新迭代内容
+   - 缺点是：非常复杂，我们的主线还没走多少呢，一大堆类接口就出现了；此外为了保证可读性需要非常清晰的注释
+
+#### 2.3 Resource
+
+在上一节结尾，我们弄清楚了两种Bean定义是如何被new出来的，但是对于`ScannedGenericBeanDefinition`创建过程中出现的`Resource`类还没有任何了解。不过就我们得到的信息：
+
+1. `Resource`类只在扫描注册过程中有用
+2. 扫描注册需要读取包路径下的类
+3. resource翻译过来就是资源
+
+我们可以简单猜测一下：**`Resource`类应该就是用于读取文件流的**
+
+现在我们直接进入这个接口
+
+老规矩先看UML类图，发现它是直接继承顶级接口`InputStreamSource`，就这个名字，基本可以认为`Resource`类和流相关。
+
+来看看两个接口的注释：
+
+1. `InputStreamSource`：是`InputStearm`源对象的简单接口，它要求每次调用`getInputStream()`方法的时候得到的都是一个新的流
+2. `Resource`：底层资源抽象出来的描述性接口，可以描述不论URL、FILE还是单纯的二进制流。但它终究是个句柄——即描述的底层资源可能并不存在。
+
+根据这俩注释，我们知道`Resource`对象就是Spring对流的一次封装，可以代表各种来源的流并且提供了重复获取流的能力。理所当然的，Spring可以通过它获取到包路径下的所有文件流。这就完成了整个扫描中将文件（主要是class文件）加载进内存的过程。
+
+再看一下`Resource`的实现，发现大多是对不同来源的资源进行一定的特殊处理。那么扫描出来的文件到底是哪一个实现呢？我们回到之前的代码打个断点：
+
+```java
+Resource[] resources = getResourcePatternResolver().getResources(packageSearchPath); // 记得将AnnotationConfigApplicationContext构造方法参数改为包路径哦
+```
+
+可以看到获取的`Resource`其实是`FileSystemResource`，而`getResourcePatternResolver()`获取到的`ResourceLoader`是帮忙用路径获取文件`Resource`的辅助接口，有兴趣的可以看看，这里只要知道此时获取到的`Resource`都是以`.class`文件结尾的class文件就行了。
+
+既然class字节码文件已经以流的形式被加载进内存（注意不是JVM虚拟机），那下一步自然就是分析该类上面有没有相应的注解来注册这个class为bean了。这就到`MetadataReader`出场的时机了。
+
+#### 2.4 MetadataReader
+
+其实我猜大部分读者应该和我一样，在要分析某个类是否有什么注解的问题上，第一反应就是jdk的反射。但spring又给我上了一课：使用asm框架直接读取class文件字节码，来获取该class文件的全部信息。事实上这也不可能走反射这条道路
+
+- 反射太重，对性能的影响很大
+- 不可能所有class文件都要先加载进jvm，生成Class对象再获取到注解，来判断是不是要注册的bean吧。
+
+**已经阅读到这里的读者应该已经习惯了Spring的代码习惯，从本节开始我将更快的跳过一些代码细节，直捣黄龙。**
+
+我们注意到`Resource`经过方法`MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);`最后变成了`MetadataReader`，那没的说，进去看看咯。
+
+进去一看，他自己就是顶级接口，那就直接看注释：
+
+> Simple facade for accessing class metadata, as read by an ASM {@link org.springframework.asm.ClassReader}.
+
+它说它是包装了由asm框架`ClassReader`读取出的元数据e而成的外观类。所谓外观类是什么可以参考**外观设计模式**，本质是封装。换句话说，通过这个接口就可以获得对应的class信息。
+
+再看它的实现，只有唯一实现`SimpleMetadataReader`(并且该类的访问控制符是final class，没有public，这说明该类只在该包下使用)，主要看构造函数
+
+```java
+SimpleMetadataReader(Resource resource, @Nullable ClassLoader classLoader) throws IOException {
+    // 根据名字和接口方法上的注释，是用来访问classReader获取到的class字节码信息的
+	SimpleAnnotationMetadataReadingVisitor visitor = new SimpleAnnotationMetadataReadingVisitor(classLoader);
+    // 通过resource（class字节码）生成classReader，并且给予visitor类对象的信息
+	getClassReader(resource).accept(visitor, PARSING_OPTIONS);
+	this.resource = resource;
+    // 将visitor的metadata赋值进来
+	this.annotationMetadata = visitor.getMetadata();
+}
+```
+
+可以看到`metadataReader`从asm中获取的只有`visitor.getMetadata();`我们点进去看看发现拿到的是类`SimpleAnnotationMetadata`：
+
+```java
+// SimpleAnnotationMetadata类中的属性：
+	private final String className;						// 类名
+	private final int access;							// 访问控制符	
+	private final String enclosingClassName;			// 直接外部类名字，如果自己是顶层类返回null
+	private final String superClassName;				// 父类名
+	private final boolean independentInnerClass;		// 该类是否是独立的：顶层类或者嵌套静态类(public static class)
+	private final String[] interfaceNames;				// 接口名
+	private final String[] memberClassNames;			// 成员类
+	private final MethodMetadata[] annotatedMethods;	// 下面3个都是注解
+	private final MergedAnnotations annotations;		
+	private Set<String> annotationTypes;				
+```
+
+全部都是一个类的信息，自然而然地包含注解的信息
+
+既然已经拿到一个class的注解信息了，下一步就是解析有没有需要被注册进的注解。根据注释在`ClassPathScanningCandidateComponentProvider`中由
+
+```java
+private final List<TypeFilter> includeFilters = new ArrayList<>();
+private final List<TypeFilter> excludeFilters = new ArrayList<>();
+```
+
+两个属性来控制不注册的注解和要注册的注解，方法就是`isCandidateComponent`
+
+至此，我们已经搞明白了从源到`BeanDefinition`的全过程，接下来就是注册进`beanFactory`的过程了
+
+#### 2.5 BeanDefinitionRegistry
+
+在之前的学习中我们了解到所有的`BeanDefinition`在注册为bean之前，先要变为`BeanDefinitionHolder`。这一节就来看看这个类是干什么的。
+
+老规矩UML，发现它直接实现顶级接口`BeanMetadataElement`，之前我们见过，这个接口也是`BeanDefinition`两个父接口之一，目的是提供配置源。
+
+再看注释：携带`beanName`和别名（`aliases`）的`BeanDefinition`。看来是处理和别名相关的类（inner bean部分略过），在注册的时候一起将别名注册进入容器里。
+
+直接看源码来印证我们的想法
+
+```java
+// 注册方法
+BeanDefinitionReaderUtils.registerBeanDefinition(definitionHolder, registry);
+
+// 具体方法
+public static void registerBeanDefinition(BeanDefinitionHolder definitionHolder, BeanDefinitionRegistry registry)
+		throws BeanDefinitionStoreException {
+
+	// Register bean definition under primary name.
+	String beanName = definitionHolder.getBeanName();
+	registry.registerBeanDefinition(beanName, definitionHolder.getBeanDefinition()); // 注册bean定义
+
+	// Register aliases for bean name, if any.
+	String[] aliases = definitionHolder.getAliases();
+	if (aliases != null) {
+		for (String alias : aliases) {
+			registry.registerAlias(beanName, alias);// 注册别名
+		}
+	}
+}
+```
+
+注意这个方法的下半部分，可以看到就是在注册别名。
+
+现在，我们把目光移到`registry`对应的接口`BeanDefinitionRegistry`上来。之前我们提过这个接口是用来管理bean定义的接口（不是访问bean实例，这是它与`beanFactory`最大的区别）现在就让我们进去看看。
+
+老规矩UML：它直接继承了顶级接口`AliasRegistry`。进入该顶级接口，阅读注释
+
+> Common interface for managing aliases——管理别名的通用接口
+
+- `AliasRegistry`的思想很简单：对任一name，它可以有很多个别名，所以得有相应管理（增删查）的方法
+
+这个接口给了`BeanDefinitionRegistry`处理别名的能力，在注册bean定义的时候也可以注册相应的别名（源码就在上面），而其方法实现是在`SimpleAliasRegistry`里。
+
+现在回到`BeanDefinitionRegistry`阅读它的注释
+
+- spring中`factory`包里唯一用于注册bean定义的接口。
+- 标准的`beanFactory`接口仅提供访问bean的方法，不去做管理bean定义的事情
+- 一般来说被`beanFactory`实现，与`AbstractBeanDefinition`交互。
+
+这几点在之前[2.2 BeanDefintion如何被创建](#2.2 BeanDefintion如何被创建)里已经提到过，这里就继续看看它的实现类。它的直接实现类有3个：`SimpleBeanDefinitionRegistry`，`DefaultListableBeanFactory`，`GenericApplicationContext`。
+
+- `SimpleBeanDefinitionRegistry`的注释：只是接口的简单实现，没有和`beanFactory`联系起来，一般用于测试获取bean定义（就是说不用它）
+- 还记得`GenericApplicationContext`持有`DefaultListableBeanFactory`的引用，所以前者实现`BeanDefinitionRegistry`接口的放法应该都是委托给后者完成。
+
+为了确认第二点，我们去`GenericApplicationContext`里面看一眼：
+
+```java
+//---------------------------------------------------------------------
+        // Implementation of BeanDefinitionRegistry
+	//---------------------------------------------------------------------
+
+	@Override
+	public void registerBeanDefinition(String beanName, BeanDefinition beanDefinition)
+			throws BeanDefinitionStoreException {
+		this.beanFactory.registerBeanDefinition(beanName, beanDefinition);
+	}
+
+	@Override
+	public void removeBeanDefinition(String beanName) throws NoSuchBeanDefinitionException {
+		this.beanFactory.removeBeanDefinition(beanName);
+	}
+
+	@Override
+	public BeanDefinition getBeanDefinition(String beanName) throws NoSuchBeanDefinitionException {
+		return this.beanFactory.getBeanDefinition(beanName);
+	}
+// 以下省略
+```
+
+确实是这样的。那没什么好说的进入`DefaultListableBeanFactory`看看我们日思夜想的`registerBeanDefinition`方法，`beanDefinition`到底是如何被注册进来的。
+
+```java
+public void registerBeanDefinition(String beanName, BeanDefinition beanDefinition) throws BeanDefinitionStoreException {
+	// 判空
+    Assert.hasText(beanName, "Bean name must not be empty");
+	Assert.notNull(beanDefinition, "BeanDefinition must not be null");
+
+    if (beanDefinition instanceof AbstractBeanDefinition) { // AbstractBeanDefinition是大多数bean定义的父类，我们常用的2种都继承了该类
+        try {
+            ((AbstractBeanDefinition) beanDefinition).validate();// 验证该bean定义有没有同时声明了factoryMethodName（使用fanctoryBean创建）和lookup-method、replace-method等原型方法。如果同时声明了，将会验证失败抛出异常
+        }
+        catch (BeanDefinitionValidationException ex) {
+            throw new BeanDefinitionStoreException(beanDefinition.getResourceDescription(), beanName,
+                                                   "Validation of bean definition failed", ex);
+        }
+    }
+
+    BeanDefinition existingDefinition = this.beanDefinitionMap.get(beanName);  // 该beanName是否已经被使用
+    if (existingDefinition != null) {
+        if (!isAllowBeanDefinitionOverriding()) { // 是否允许覆盖bean定义
+            throw new BeanDefinitionOverrideException(beanName, beanDefinition, existingDefinition);
+        }
+        // 下面都是logger
+        else if (existingDefinition.getRole() < beanDefinition.getRole()) { // 用框架内部产生的bean覆盖用户自定义的bean
+            // e.g. was ROLE_APPLICATION, now overriding with ROLE_SUPPORT or ROLE_INFRASTRUCTURE
+            if (logger.isInfoEnabled()) {
+                logger.info("Overriding user-defined bean definition for bean '" + beanName +
+                            "' with a framework-generated bean definition: replacing [" +
+                            existingDefinition + "] with [" + beanDefinition + "]");
+            }
+        }
+        else if (!beanDefinition.equals(existingDefinition)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Overriding bean definition for bean '" + beanName +
+                             "' with a different definition: replacing [" + existingDefinition +
+                             "] with [" + beanDefinition + "]");
+            }
+        }
+        else { // 此时俩个bean定义相同
+            if (logger.isTraceEnabled()) {
+                logger.trace("Overriding bean definition for bean '" + beanName +
+                             "' with an equivalent definition: replacing [" + existingDefinition +
+                             "] with [" + beanDefinition + "]");
+            }
+        }
+        this.beanDefinitionMap.put(beanName, beanDefinition); // 覆盖
+    }
+    else { // 没有相同beanName
+        if (hasBeanCreationStarted()) { // 是否处于启动时，因为运行时会经常遍历这些Collection，如果进行元素增删将会抛出异常
+            // Cannot modify startup-time collection elements anymore (for stable iteration)
+            synchronized (this.beanDefinitionMap) {
+                this.beanDefinitionMap.put(beanName, beanDefinition); // 注册该bean，map当锁可以放心添加
+                List<String> updatedDefinitions = new ArrayList<>(this.beanDefinitionNames.size() + 1);// 新声明一个list
+                updatedDefinitions.addAll(this.beanDefinitionNames);
+                updatedDefinitions.add(beanName);
+                this.beanDefinitionNames = updatedDefinitions; // 用添加了新beanName的list替换旧的
+                removeManualSingletonName(beanName); // 从手动注册单例列表中移除该beanName
+            }
+        }
+        else {
+            // Still in startup registration phase
+            this.beanDefinitionMap.put(beanName, beanDefinition);
+            this.beanDefinitionNames.add(beanName);
+            removeManualSingletonName(beanName);
+        }
+        this.frozenBeanDefinitionNames = null; // 新增了bean，缓存的bean当然要清除
+    }
+
+    if (existingDefinition != null || containsSingleton(beanName)) { // 如果以前有过同beanName存在，清除与该bean相关的缓存
+        resetBeanDefinition(beanName);
+    }
+    else if (isConfigurationFrozen()) { // 如果是新增的bean，且以前缓存了所有bean定义的元数据的话，清除所有k-v为<Class<?>, String[]>的Map缓存
+        clearByTypeCache();
+    }
+}
+```
+
+可以看得，注册的过程就是对`beanDefinitionMap`管理和清楚缓存的过程。
+
+至此，我们**粗略**得完成了从源到bean的流程，本次的主线已经完成，中间有一些细节，但那些细节我们放在后面的details里面谈。
+
+#### 2.6 小结
+
+1. bean定义是bean的原型，具有bean的全部信息。
+2. 显式注册方式比较简单，因为它们的类已经被加载进了JVM（构造方法就是传入Class类）。后续就是利用反射获取到各种信息，生成metaData放在bean定义里。再经过校验等过程，注册为bean定义。
+3. 扫描注册方式较为繁杂，首先需要从传入的包路径下加载所有.class文件进入内存（不是JVM），再用asm框架从2进制流中直接读取该类的所有信息，生成metaData放在bean定义中。再经过校验等过程，注册为bean定义。
+4. 真正完成注册功能的接口是`BeanDefinitionRegistry`，里面声明了注册、管理bean定义的方法
+5. `beanDefinitionHolder`帮忙完成注册别名的工作
+6. 注册的时候会相应的清除缓存
+
+终于，我们完成了整个大流程…………了吗？
+
+```java
+public AnnotationConfigApplicationContext(String... basePackages) {
+    this();  // 第一章，创建容器
+    scan(basePackages);  // 第二章，注册bean定义
+    refresh();	// 这是干嘛的？？？
+}
+```
+
+突然想起来，spring的Ioc除了管理bean定义的创建，好像距离一个真正的bean，还差一个创建bean和初始化赋值的过程。这个`refresh()`方法难道就是干这事的？不得不说，本以为完事结果还是差了一大截，整理一下继续吧。
+
+### **三、refresh()**方法
+
+我想，大部分对spring有一点深究或者学习的时候应该都听过`refresh()`方法，不过用spring这么久也还是没有搞明白这个方法到底是干啥的。正好我们对源码的探究也到这里了：在之前的小结中，我们猜测创建和初始化一个bean的过程在`refresh()`方法中，到底是不是呢？
+
+#### 3.1 初探refresh()方法
+
+回到构造函数
+
+```java
+public AnnotationConfigApplicationContext(String... basePackages) {
+    this();  // 第一章，创建容器
+    scan(basePackages);  // 第二章，注册bean定义
+    refresh();	
+}
+```
+
+我们进入`refresh();`方法，发现处于`AbstractApplicationContext`类中。还记得这个类是`GenericApplicationContext`的父类，并且默认具有容器的`DefaultListableBeanFactory`类并没有处于`AbstractApplicationContext`中，这个抽象类只声明了模板方法
+
+`public abstract ConfigurableListableBeanFactory getBeanFactory() throws IllegalStateException;`
+
+来获取子类声明的`ConfigurableListableBeanFactory `。
+
+注意到`refresh()`方法的上面也有`@Override`注解，点进去发现声明该方法的接口是`ConfigurableApplicationContext`。阅读`refresh()`的注释：
+
+- 该方法是用来加载或者刷新持久配置的表象
+  - 所谓持久配置指的就是外部源的配置——xml文档、数据库、配置文件、class文件都可以是
+  - 这里的表象就是这些外部配置在spring中的表现形式——主要指的是ApplicationContext。
+- 这是一个启动方法，如果方法完成所有的单例都被创建完成；反之任何一个单例都不能被创建
+  - 暗示这个方法要进行bean的实例化（创建bean的实例）。
+  - 这个方法应该忽略`initLazy`为true的bean定义，懒加载不是这个时实例化的。
+  - 该方法不实例化多例，可以猜测多例只有bean定义，每次都创建个新的。
+  - 方法中间抛出异常就让所有bean都销毁的原因是为了防止内存泄漏。
+
+现在我们先根据注释从整体来看一下整个`refresh()`方法干了什么事情：
+
+```java
+public void refresh() throws BeansException, IllegalStateException {
+    synchronized (this.startupShutdownMonitor) {
+        StartupStep contextRefresh = this.applicationStartup.start("spring.context.refresh");
+        // Prepare this context for refreshing.
+        prepareRefresh();
+        // Tell the subclass to refresh the internal bean factory.
+        ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+        // Prepare the bean factory for use in this context.
+        prepareBeanFactory(beanFactory);
+        try {
+            // Allows post-processing of the bean factory in context subclasses.
+            postProcessBeanFactory(beanFactory);
+            StartupStep beanPostProcess = this.applicationStartup.start("spring.context.beans.post-process");
+            // Invoke factory processors registered as beans in the context.
+            invokeBeanFactoryPostProcessors(beanFactory);
+            // Register bean processors that intercept bean creation.
+            registerBeanPostProcessors(beanFactory);
+            beanPostProcess.end();
+            // Initialize message source for this context.
+            initMessageSource();
+            // Initialize event multicaster for this context.
+            initApplicationEventMulticaster();
+            // Initialize other special beans in specific context subclasses.
+            onRefresh();
+            // Check for listener beans and register them.
+            registerListeners();
+            // Instantiate all remaining (non-lazy-init) singletons.
+            finishBeanFactoryInitialization(beanFactory);
+            // Last step: publish corresponding event.
+            finishRefresh();
+        }
+        catch (BeansException ex) {
+            if (logger.isWarnEnabled()) {
+                logger.warn("Exception encountered during context initialization - " +
+                            "cancelling refresh attempt: " + ex);
+            }
+            // Destroy already created singletons to avoid dangling resources.
+            destroyBeans();
+            // Reset 'active' flag.
+            cancelRefresh(ex);
+            // Propagate exception to caller.
+            throw ex;
+        }
+        finally {
+            // Reset common introspection caches in Spring's core, since we
+            // might not ever need metadata for singleton beans anymore...
+            resetCommonCaches();
+            contextRefresh.end();
+        }
+    }
+}
+```
+
+通观整个方法，有几个`init`开头的方法`finishBeanFactoryInitialization(beanFactory);`。猜测，这几个方法都是完成bean实例化的。前几个具体初始化特殊类的bean，最后那个是完成一般bean的初始化。为了验证点进去看看注释：
+
+> 初始化所有剩余的单例bean，完成beanFactory的初始化。
+
+虽然找到了初始化方法，但是前面的内容也不得不让人在意，因此本章的主线就是跟着源码看看这个`refresh()`除了初始化bean以外还干了什么事情。
+
+#### 3.2 第一部分——准备Context和新的BeanFactory
+
+直接看源码，源码上面的注释大致是我自己翻译，也有一些是我自己加的
+
+```java
+synchronized (this.startupShutdownMonitor) {	
+    // 启动时阶段标志器
+    StartupStep contextRefresh = this.applicationStartup.start("spring.context.refresh");
+    // 为refresh作准备
+    prepareRefresh();
+    // 要求子类（默认GenericApplicationContext）刷新它的beanFactory
+    ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+    // 准备在该context使用的beanFactory
+    prepareBeanFactory(beanFactory);
+}
+```
+
+我们一步一步来，先看`prepareRefresh();`看看这个过程到底准备了什么（注释大致还是翻译）
+
+```java
+// 准备刷新context
+protected void prepareRefresh() {
+		// 设置启动时间，context状态
+		this.startupDate = System.currentTimeMillis();
+		this.closed.set(false);
+		this.active.set(true);
+		// logger记录日志
+		if (logger.isDebugEnabled()) {
+			if (logger.isTraceEnabled()) {
+				logger.trace("Refreshing " + this);
+			}
+			else {
+				logger.debug("Refreshing " + getDisplayName());
+			}
+		}
+
+		// 替换Context中所有占位PropertySource。
+    	// 在创建Context的时候，部分PropertySource可能无法被初始化，此时需要用占位PropertySource先把位置占住，到这里进行替换
+    	// 默认空实现，因为对单纯的Spring来说没啥要替换的
+		initPropertySources();
+		
+    	// getEnvironment()返回的ConfigurableEnvironment代表着运行环境信息
+    	// validateRequiredProperties()验证必要的环境信息是否可以被解析且不为null
+		getEnvironment().validateRequiredProperties();
+
+		// 这个用于存refresh之前的监听器
+		if (this.earlyApplicationListeners == null) {
+			this.earlyApplicationListeners = new LinkedHashSet<>(this.applicationListeners);
+		}
+		else {
+			// 将本地监听器设置为refresh之前的状态
+			this.applicationListeners.clear();
+			this.applicationListeners.addAll(this.earlyApplicationListeners);
+		}
+
+		// 允许在Multicast可用后发布的ApplicationEvents的集合
+		this.earlyApplicationEvents = new LinkedHashSet<>();
+	}
+```
+
+把注释简单翻译一下瞬间懵了，突然出现了好多根本不认识的东西，不过静下心简单分析一下发现这个方法主要处理了2个主要内容：
+
+- 环境配置内容的更替和校验
+- refresh之前的监听器和监听事件
+
+这就是`prepareRefresh();`干的事情，至于环境、配置、监听和监听器的内容，我们在后几节详谈。
+
+下一个方法是
+
+```java
+ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory(); // 获取新的BeanFactory
+```
+
+我们进入源码看一下：
+
+```java
+// 通知子类refresh其内部的beanFactory
+protected ConfigurableListableBeanFactory obtainFreshBeanFactory() {
+    refreshBeanFactory();
+    return getBeanFactory();
+}
+```
+
+发现就2行代码，进入第一行的`refreshBeanFactory();`阅读注释：
+
+- 子类必须实现这个方法来执行实际的加载配置过程
+- 在其他初始化工作之前，`refresh()`方法将会调用这个方法
+- 子类有2种方式来实现这个方法：
+  - 直接创建一个新的`beanFactory`并且持有它的引用
+  - 就只允许一个beanFactory实例存在，也就是说，第二次调用这个方法的时候将会抛出`IllegalStateException`异常，根本不允许创建新的`beanFactory`
+
+也就是说`refreshBeanFactory();`要么让持有的`beanFactory`恢复至第一次`refresh()`之前的状态（通过创建一个新的beanFactory的方式）
+
+- 因为`prepareRefresh()`方法没有与`beanFactory`进行任何交互，也可以理解为恢复至第一次`prepareRefresh()`之后的状态
+
+要么直接不允许再一次`refresh()`。**看来，每一次`refresh()`执行到这之后`beanFactory`都可以保证都是处于相同状态的**。
+
+#### 3.3 再看BeanFactory
+
+本来该继续下一个方法`prepareBeanFactory(beanFactory);`的。根据注释，这个方法全部都是对新的beanFactory进行标准配置…………但一眼下去，这又是一大堆没见过的方法，逼得我们不得不重新审视一下`ConfigurableListableBeanFactory`。
+
+在之前对于`BeanFactory`接口的介绍中，我们只对其两个子接口：`ListableBeanFactory`和`HierarchicalBeanFactory`两个接口进行过简单的介绍，但事实上还有一个也比较重要的接口：`AutowireCapableBeanFactory`没有提及。这是因为这跟我们寻找容器在哪没有直接联系（上面2个在接口中提到了，我就简单的的说了一下），为了逻辑清晰，我选择性地跳过了这一部分。而现在已经到全面建设`BeanFactory`的时候了，那这再不看一下确实不合适了。
+
+此外再看`ConfigurableListableBeanFactory`的UML类图：
+
+![ConfigurableListableBeanFactory-uml](./ConfigurableListableBeanFactory.png)
+
+可以发现`ConfigurableListableBeanFactory`和`ApplicationContext`接口类似，也是集大成者，所以重回我们的`BeanFactory`和它的子接口，看看在到底定义了哪些方法和相应的类吧。当然，与主线无关的内容我还是会跳哦~
+
+**BeanFactory**
+
+正如我们之前说过的那样，这个接口只提供访问bean定义的方法，打开`structure(alt+7)`看看方法，基本上是这些：
+
+```java
+Object getBean(String name) throws BeansException;
+boolean containsBean(String name);
+boolean isSingleton/isPrototype(String name) throws NoSuchBeanDefinitionException;
+Class<?> getType(String name) throws NoSuchBeanDefinitionException;
+String[] getAliases(String name);
+```
+
+应该没有什么好说的，这些都是看名字就知道干啥的方法了。至于`<T> ObjectProvider<T> getBeanProvider(Class<T> requiredType);`这种方法在之后会谈。
+
+**ListableBeanFactory**
+
+该接口提供了遍历beanName的一些方法，之后就可以靠`getBean();`来获取bean，基本上的方法是这些：
+
+```java
+int getBeanDefinitionCount();
+String[] getBeanDefinitionNames();
+boolean containsBeanDefinition(String beanName);
+String[] getBeanNamesForType(ResolvableType type);
+<T> Map<String, T> getBeansOfType(Class<T> type) throws BeansException;
+String[] getBeanNamesForAnnotation(Class<? extends Annotation> annotationType);
+Map<String, Object> getBeansWithAnnotation(Class<? extends Annotation> annotationType) throws BeansException;
+<A extends Annotation> A findAnnotationOnBean(String beanName, Class<A> annotationType) throws NoSuchBeanDefinitionException;
+```
+
+可以看出来提供了通过类型、注解获取bean、beanName，或者直接获取全部bean定义名字的方法。此外除了`getBeanDefinitionCount`和`containsBeanDefinition`外，**其他方法不应该频繁调用**，也因此这些方法的实现可能会比较慢。
+
+**AutowireCapableBeanFactory**
+
+第一个见这个接口，先看名字，嗯？autowire这可太熟悉了。简单翻译一下似乎是说“可以自动装配的`BeanFactory`”。那这个接口就是定义如何装配bean的？
+
+带着疑问，再看注释：
+
+1. 虽然是`BeanFactory`的子接口，但并不建议在一般Spring应用程序中直接使用它，也因此`ApplicationContext`没有实现这个接口
+
+2. 该接口拓展`BeanFactory`接口的**自动装配方法**，如果想让自己的bean获得自动装配能力的`beanFactory`需要实现该接口。
+
+3. 可以用于整合其他框架：将不受Spring管理的实例注入Spring中的bean，以完成自动装配，这样可以整合其他框架（但装配完成后，其他框架的实例依旧不受Spring管理，也不会在Spring中创建相应的bean）。
+
+4. 该接口主要处理xml文件中定义的\<beans\>标签下“default-autowire”属性，默认是"no"，**任何与注解@Autowire或者@Resource相关的依赖注入都与该接口无关！**
+
+5. 虽然`ApplicationContext`没有继承`AutowireCapableBeanFactory`接口，但也可以从`getAutowireCapableBeanFactory()`方法中获取到实现这个接口的`BeanFactory`
+
+   - 或者去实现`BeanFactoryAware`，将BeanFactory强转为`AutowireCapableBeanFactory`。
+
+     - `XXXAware`接口提供setXXX方法，可以将XXX存储在自己的属性中，比如：
+
+       ```java
+       public class ExampleOfAware implements BeanFactoryAware {
+           private BeanFactory beanFactory;
+           @Override
+           public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
+               this.beanFactory = beanFactory;
+           }
+       }
+       // 这下ExampleOfAware就持有了beanFactory的引用，至于Spring什么时候调用setBeanFactory()方法在后面会谈。
+       ```
+
+可见，该接口确实提供了自动装配的方法，并且是对**任意实例**都可以装配而不仅限制于spring管理的bean。现在来看看它的具体源码，主要分为4部分：
+
+- 常量：
+
+  ```java
+  // 这四个常量和xml文件中<beans>标签下default-autowire相关。
+  // 没有自动装配，但是xxxAware和注解依然有效
+  int AUTOWIRE_NO = 0;
+  // 根据名称自动装配
+  int AUTOWIRE_BY_NAME = 1;
+  // 根据类型自动装配
+  int AUTOWIRE_BY_TYPE = 2;
+  // 根据构造函数装配
+  int AUTOWIRE_CONSTRUCTOR = 3;
+  // 根据待装填的类自动装配，已被废弃，被@Autowire等注解取代
+  @Deprecated
+  int AUTOWIRE_AUTODETECT = 4;
+  // spring5.1之后的约定后缀。加载全限定类名之后来强制返回没有被代理的bean
+  String ORIGINAL_INSTANCE_SUFFIX = ".ORIGINAL";
+  ```
+
+- 粗粒度的创建和注入外部实例方法：
+
+  ```java
+  <T> T createBean(Class<T> beanClass) throws BeansException;
+  void autowireBean(Object existingBean) throws BeansException;
+  Object configureBean(Object existingBean, String beanName) throws BeansException;
+  ```
+
+- 细粒度控制bean生命周期的方法：
+
+  在生命周期、自动装配方式上等进行更细节的控制。
+
+  ```java
+  Object createBean(Class<?> beanClass, int autowireMode, boolean dependencyCheck) throws BeansException;
+  Object autowire(Class<?> beanClass, int autowireMode, boolean dependencyCheck) throws BeansException;
+  void autowireBeanProperties(Object existingBean, int autowireMode, boolean dependencyCheck) throws BeansException;
+  void applyBeanPropertyValues(Object existingBean, String beanName) throws BeansException;
+  Object initializeBean(Object existingBean, String beanName) throws BeansException;
+  Object applyBeanPostProcessorsBeforeInitialization(Object existingBean, String beanName) throws BeansException;
+  Object applyBeanPostProcessorsAfterInitialization(Object existingBean, String beanName) throws BeansException;
+  void destroyBean(Object existingBean);
+  ```
+
+- 解析注入点
+
+  ```java
+  // 根据class获得bean实例和它的beanName，与getBean()方法类似
+  <T> NamedBeanHolder<T> resolveNamedBean(Class<T> requiredType) throws BeansException;
+  // 下面3个方法参数都有DependencyDescriptor类，根据注释他就是某个特定依赖进行注入的描述类
+  // 这三个都是解析注入点的方法
+  Object resolveBeanByName(String name, DependencyDescriptor descriptor) throws BeansException;
+  Object resolveDependency(DependencyDescriptor descriptor, String requestingBeanName) throws BeansException;
+  Object resolveDependency(DependencyDescriptor descriptor, String requestingBeanName,
+  	Set<String> autowiredBeanNames, TypeConverter typeConverter) throws BeansException;
+  ```
+
+至此，简单对它的方法有个印象：
+
+1. bean生命周期里，装配过程占了很大一部分
+2. 可以对非Spring管理的bean装配组件
+3. **虽然感觉这个接口比较有料，但感觉和refresh()方法没有什么大的联系，所以我们依旧将其跳过。**
+
+**HierarchicalBeanFactory**
+
+该接口之前也看过，是提供了父子层级的接口。
+
+**ConfigurableBeanFactory**
+
+这个接口继承自`HierarchicalBeanFactory`,`SingletonBeanRegistry`。分别带来了
+
+- 父子层级的beanFactory
+- 注册bean定义
+
+这两种功能，再看注释：大多数`beanFactory`将会实现本接口，**本接口提供了大量（真的很多）方法来配置`beanFactory`。**
+
+换句话说，这个接口定义的方法要么直接或者间接和`beanFactory`的配置相关。
+
+感觉会和我们之前停下来的方法`prepareBeanFactory(beanFactory);`有关，毕竟都是对beanFactory进行一些配置嘛。为了证实，点进方法进去的第一句：
+
+```java
+beanFactory.setBeanClassLoader(getClassLoader());
+```
+
+就是定义在`ConfigurableBeanFactory`接口的方法。看来这次是要**仔细研读**一下这个接口了。
+
+1. scope相关方法
+
+   首先看见的就是两个常量：
+
+   ```java
+   String SCOPE_SINGLETON = "singleton";
+   String SCOPE_PROTOTYPE = "prototype";
+   ```
+
+   根据注释，这俩分别对应单例、多例的两个scope（翻译过来是作用域），并且可以通过`registerScope()`方法注册新的Scope。
+
+   ```java
+   void registerScope(String scopeName, Scope scope); // Scope是一个接口
+   // 下面两个都只会返回显式注册的scopes，singleton和prototype不会被返回
+   String[] getRegisteredScopeNames();
+   Scope getRegisteredScope(String scopeName);
+   // 	销毁具有显式scope的bean（singleton和prototype不算，会抛异常）
+   void destroyScopedBean(String beanName);
+   // 根据bean定义销毁指定的bean（一般用于销毁多例，SCOPE_PROTOTYPE）
+   void destroyBean(String beanName, Object beanInstance);
+   // 销毁所有单例，SCOPE_SINGLETON
+   void destroySingletons();
+   ```
+   
+   关于scope我们也不是第一次遇见了：bean定义里面有个属性就是scope，且在处理bean定义注解内容的时候有对@Scope注解的处理（也是此时设置的bean定义里面的scope属性的时候）。点开`Scope`接口，根据注释：**它缓存有一系列bean实例**，并且在获取、删除、销毁这个bean的时候提供了拓展的机会：
+   
+   - `Object get(String name, ObjectFactory<?> objectFactory);`中`ObjectFactory<T>`是一个函数式接口，他和`FactoryBean`的功能一样，都是我们自己创建（此时可以随意拓展）且返回一个bean，但**最大的区别**在于FactoryBean是一个bean，由Spring管理它，对这个bean创建出来的实例，我们只需要注入就好（类似SPI）；而`ObjectFactory<T>`并不由Spring管理，我们需要主动地调用这个接口的`getObject()`方法来创建实例（是一个API）。它的功能和Spring没有什么关系，更一般地说`ObjectFactory<T>`与`Supplier<T>`几乎等价，前者是Spring1.0.2的接口，而后者是jdk1.8的内容，怀疑是以前Spring没有函数式接口，自己写了一个通用的创建对象的接口。
+   - `void registerDestructionCallback(String name, Runnable callback);`提供了一个Runnable来完成销毁要干的事情。
+   
+   至此，我们可以理解Scope像是一种策略接口，**根据bean定义上scope的不同提供不同的获取、删除、销毁实现方式**。更具体的例子可以先用singleton和prototype理解一下，后面再谈其他的一些scope。
+   
+2. setParentBeanFactory，如果有印象的话这个方法我们遇到过。
+
+   ```java
+   void setParentBeanFactory(BeanFactory parentBeanFactory) throws IllegalStateException;
+   ```
+
+   因为是`ConfigurableBeanFactory`**可配置**的beanFactory，所以提供了创建之后设置父beanFactory的方法（不然只能通过构造方法设置）。此外一旦设置之后就不能再改动了。
+
+3. classLoader相关方法
+
+   ```java
+   void setBeanClassLoader(@Nullable ClassLoader beanClassLoader);
+   ClassLoader getBeanClassLoader();
+   void setTempClassLoader(@Nullable ClassLoader tempClassLoader);
+   ClassLoader getTempClassLoader();
+   ```
+
+   这里出现了两个classLoader，根据注释：
+
+   - beanClassLoader：用于加载bean class的类加载器
+     - 默认为当前线程上下文的类加载器
+     - 这个classLoader只用于没有加载bean class的bean定义，比如spring2.0默认在`beanFactory`处理bean定义之前只包含类名。
+   - tempClassLoader：用于类型匹配
+     - 涉及加载时编织（load-time weaving）将会只用临时类加载器，以保证实际实例的懒加载
+     - 当beanFactory启动完成之后，将会删去临时类加载器
+
+4. bean元数据相关：
+
+   ```java
+   void setCacheBeanMetadata(boolean cacheBeanMetadata);
+   boolean isCacheBeanMetadata();
+   BeanDefinition getMergedBeanDefinition(String beanName) throws NoSuchBeanDefinitionException;
+   ```
+
+   这几个方法和bean元数据相关，根据注释这里的元数据主要是合并bean定义（mergedBeanDefinition）
+
+   - 主要针对父子bean，子bean定义（ChildBeanDefiition）加上父bean定义（RootBeanDefinition）的缺省信息组合而成。
+   - 如果方法`isCacheBeanMetadata();`返回的是false，那么这意味着该`beanFactory`不缓存`mergedBeanDefinition`，每次创建bean实例的时候都会重新查询bean class来确定这个bean的类型。
+   - `getMergedBeanDefinition()`就是从上述的合并bean定义缓存里拿取bean定义，如果关闭了缓存就从`beanDefinitionMap`里面拿，并且不进行缓存。
+
+5. 表达式解析相关：
+
+   ```java
+   void setBeanExpressionResolver(@Nullable BeanExpressionResolver resolver);
+   BeanExpressionResolver getBeanExpressionResolver();
+   void addEmbeddedValueResolver(StringValueResolver valueResolver);
+   boolean hasEmbeddedValueResolver();
+   String resolveEmbeddedValue(String value);
+   ```
+
+   `BeanExpressionResolver`用于解析spel，而`EmbeddedValueResolver`用于解析注解里的String，有兴趣可以研究。
+
+6. 类型转换相关：
+
+   ```java
+   void setConversionService(@Nullable ConversionService conversionService);
+   ConversionService getConversionService();
+   void addPropertyEditorRegistrar(PropertyEditorRegistrar registrar);
+   void registerCustomEditor(Class<?> requiredType, Class<? extends PropertyEditor> propertyEditorClass);
+   void copyRegisteredEditorsTo(PropertyEditorRegistry registry);
+   void setTypeConverter(TypeConverter typeConverter);
+   TypeConverter getTypeConverter();
+   ```
+
+   都是用于做类型转换的方法，涉及到String来转的基本都用到了`PropertyEditor`
+
+7. bean后处理器相关
+
+   ```java
+   void addBeanPostProcessor(BeanPostProcessor beanPostProcessor);
+   int getBeanPostProcessorCount();
+   ```
+
+   既然正式接触到了`BeanPostProcessor`，这里就进去探一探……注释：
+
+   - 该接口允许自定义修改新的bean实例
+
+   - 该接口只有2个默认方法：
+
+     ```java
+     // 当一个bean实例被创建并且赋值之后立刻调用的回调方法，在所有其他初始化方法之前
+     default Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+         return bean;
+     }
+     // 当所有其他初始化方法调用之后，调用该方法.此外InstantiationAwareBeanPostProcessor#postProcessBeforeInstantiation()方法触发短路之后也会调用这个方法
+     // 对于FactoryBean，该bean和它创建的实例都会经过该方法
+     default Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+         return bean;
+     }
+     ```
+
+   - 一般来说，通过一些**标记**来填充bean的行为走`postProcessBeforeInitialization()`方法；
+
+     - 猜测@Autowire注解可能就是在这里进行解析的
+
+   - 一般来说，生成**代理**走`postProcessAfterInitialization()`方法。
+
+     - 猜测AOP的过程就是在这里完成的
+
+8. 阶段标志器相关：
+
+   ```java
+   void setApplicationStartup(ApplicationStartup applicationStartup);
+   ApplicationStartup getApplicationStartup();
+   ```
+
+   将`ApplicationContext`的标志器放进来，继续记录
+
+9. 安全访问相关：
+
+   ```java
+   AccessControlContext getAccessControlContext();
+   ```
+
+   根据注释：用于做出对系统资源访问决策，但我以前确实没有接触过，看之后在details里面能不能补上吧，先放着
+
+10. beanFactory相关：
+
+    ```java
+    void copyConfigurationFrom(ConfigurableBeanFactory otherFactory);
+    ```
+
+    复制另一个beanFactory的配置，**只有配置，不复制bean定义**。
+
+11. 其他简单的方法：这些方法比较简单，多是一些辅助方法（除了别名和正在创建，但我不想分类了），看一下就明白的
+
+    ```java
+    // 注册别名
+    void registerAlias(String beanName, String alias) throws BeanDefinitionStoreException;
+    // 解析别名，修改别名map
+    void resolveAliases(StringValueResolver valueResolver);
+    // 判断是不是factoryBean
+    boolean isFactoryBean(String name) throws NoSuchBeanDefinitionException;
+    // 下面两个只在容器内部使用，用于设置某个bean是否正在被创建
+    void setCurrentlyInCreation(String beanName, boolean inCreation);
+    boolean isCurrentlyInCreation(String beanName);
+    // 下面3个方法用于注册bean之间的依赖关系，便于递归销毁
+    void registerDependentBean(String beanName, String dependentBeanName);
+    String[] getDependentBeans(String beanName);
+    String[] getDependenciesForBean(String beanName);
+    ```
+
+至此看完了`ConfigurableBeanFactory`所有的定义方法，可以看得出来这个接口其实提供了很多功能点，现在我们全面了解了一个`BeanFactory`的配置了，终于可以…………见最后一个`BeanFactory`了……
+
+**ConfigurableListableBeanFactory**
+
+我们终于回到了`ConfigurableListableBeanFactory`接口，作为所有`BeanFactory`接口的集大成者，我们也来研读一下它的源码
+
+注释：
+
+大多数可遍历的beanFactory都要实现该接口，除了`ConfigurableBeanFactory`接口中的配置功能，还提供了**分析、修改bean定义**的方法以及**提前实例化所有单例**的方法。
+
+现在我们来看看定义的方法：
+
+1. 依赖注入相关：这里再强调一下，**@Autowire和@Resource注解与这些方法无关！**这里讨论的是xml文档里\<beans\>标签下`default-autowire`属性不为no的时候（会有自动装配）
+
+   ```java
+   void ignoreDependencyType(Class<?> type);
+   void ignoreDependencyInterface(Class<?> ifc);
+   void registerResolvableDependency(Class<?> dependencyType, @Nullable Object autowiredValue);
+   boolean isAutowireCandidate(String beanName, DependencyDescriptor descriptor) throws NoSuchBeanDefinitionException;
+   ```
+
+   - 第一个方法：注册自动装配时待忽略的类型（包括接口），这样自动装配的时候就会忽略掉这些类了。
+   
+   - 第二个方法：取名的反面教材，这个名字很容易和第一个方法进行比较而认为是忽略接口，**但是**，它和第一个方法没有一点关系！这个方法的意思是：
+     1. 接口ifc里面声明了setter方法（考虑XXXAware接口）
+     
+     2. 实现类里面持有和ifc接口中setter入参相同类型的引用（`setXXX(XXX xxx)`）
+     
+     3. spring会忽略XXX的自动装配
+     
+        ```java
+        public class IgnoreClass implements BeanFactoryAware {
+        
+            private BeanFactory beanFactory;
+            
+            @Override
+            public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
+                // do nothing
+            }
+        }
+        // ignoreDependencyInterface(BeanFactoryAware.class)，注册之后，即使default-autowire不为"no"，IgnoreClass中的beanFactory字段也不会自动装填，
+        ```
+     
+   - 第三个方法：将一个实例注册为该实例类型的装配值。主要用于注入那些不是bean却需要被注入的类型。比如：beanFactory，ApplicationContext等。
+   
+   - 第四个方法：检测该bean是不是要被注入某个依赖的bean
+   
+2. 缓存相关：
+
+   ```java
+   void clearMetadataCache();
+   void freezeConfiguration();
+   boolean isConfigurationFrozen();
+   ```
+
+   这三个方法都是和缓存相关的方法，其中最后一个我们在之前的`registerBeanDefinition()`中见过，这次我们就来详细看看这几个方法到底是干什么的：
+
+   - 第一个方法：
+
+3. 其他：
+
+
+
+
+
