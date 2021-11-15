@@ -1893,7 +1893,7 @@ graph TD
   - 这种拓展方式解耦不够彻底，所以他的拓展性有限：每一次修改都要写一个子类、只能根据定好的参数和返回值进行拓展
   - 但反过来说，因为是流程
 
-#### 3.5 第三部分——后置处理器
+#### 3.5 第三部分——beanFactory后置处理器
 
 在完成初始化准备之后，接下来我们要干的事情是什么呢？继续往下看
 
@@ -1935,7 +1935,224 @@ protected void invokeBeanFactoryPostProcessors(ConfigurableListableBeanFactory b
 
 根据注释，我们发现了一个接口`BeanFactoryPostProcessor`，这个接口和之前遇到过的`BeanPostProcessor`接口名称有些相似，猜测是`BeanFactory`的后置处理器。
 
-进入该接口看看：
+进入`BeanFactoryPostProcessor`看看注释：
+
+- 该接口是修改`beanFactory`的钩子(hook)接口。
+  - 注意，在这个接口中尽量只与**bean定义**交互，绝对不能**随意地**与**bean实例**交互，这样可能会提早bean的实例化，如果一定要和bean实例交互，使用`BeanPostProcessor`。
+  - 但这也不是说不能实例化一些bean，比如`EventListenerMethodProcessor`中就直接实例化了`DefaultEventListenerFactory`
+- `BeanFactoryPostProcessor`可以通过一下两种方式进行注册：
+  1. 实现该接口的类，只要作为bean被扫描到就算注册完成，具体如何完成一会看源码
+  2. 使用`ConfigurableApplicationContext`的`addBeanFactoryPostProcessor`方法也可以人为地注册。
+
+- 可以通过`Ordered`和`PriorityOrdered`接口排序，但是以手动注册方法的后处理器将无视这两接口的排序。
+
+然后该接口只有一个方法：
+
+```java
+void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) throws BeansException;
+```
+
+可以注意到，我们是直接拿到`beanFactory`进行修改操作的，因此除了配置`beanFactory`的一些内容，我们还可以直接修改bean定义。（毕竟bean定义也算beanFactory的配置内容嘛）
+
+- 注意到它的子接口`BeanDefinitionRegistryPostProcessor`提供了
+
+  ```java
+  void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) throws BeansException;
+  ```
+
+  还记得`BeanDefinitionRegistry`接口可以提供bean定义的注册吗，马上我们就会大量接触到它。
+
+总之，我们现在了解到：**如果要在bean实例化之前修改beanFactory的配置，那么可以写一个类实现该接口，通过该接口的方法进行相应的修改，但要注意bean实例化的问题。**
 
 
+
+回到之前的`postProcessBeanFactory`方法源码之前还有一个问题：之前我们提到在进行beanFactory后置处理之前没有一个bean是被实例化的，而要完成实现`BeanFactoryPostProcessor`类中修改bean的目的，就不得不**实例化该类**并且调用它的`postProcessBeanFactory`方法。
+
+可以猜测，在`postProcessBeanFactory`方法中，一定特殊地将实现了`BeanFactoryPostProcessor`接口的类变成了一个个的bean。
+
+- 注意区分`refresh`方法里特殊实例化的bean和`BeanFactoryPostProcessor`接口方法中处理`beanFactory`时实例化bean的区别：前者是启动过程进行的必要过程；后者是要注意某些bean一旦被实例化可能导致的问题，但如果确定不会导致什么问题，那就可以做。
+
+继续源码，先看源码中带注释的那一段:
+
+这一段很眼熟，在`prepareBeanFactory`中也出现过，是跟AOP相关的内容。为什么这里又出现了呢？根据注释，这是因为经过`beanFactory`后置处理器处理，可能会带来相应的AOP的bean（比如`@Bean`注解就是用`ConfigurationClassPostProcessor`后置处理器处理的）。
+
+这么看来最重要的就是第一行代码了，我们跟进去看看:
+
+先看`PostProcessorRegistrationDelegate`注释：是`AbstractApplicationContext`**后置处理器**的委托类，注意到该描述没有限定是beanFactory还是bean的后置处理器，所以应该会处理这两种后置处理器。果然，仅有的两个public方法`invokeBeanFactoryPostProcessors`和`registerBeanPostProcessors`分别**处理beanFactory后置处理器**和**注册bean后置处理器**。
+
+这里我们继续跟进`invokeBeanFactoryPostProcessors`方法的源码，很长我们将其分为2个部分：
+
+```java
+public static void invokeBeanFactoryPostProcessors(
+    ConfigurableListableBeanFactory beanFactory, List<BeanFactoryPostProcessor> beanFactoryPostProcessors) {
+    // 两个参数分别是beanFactory和getBeanFactoryPostProcessors()返回的手动注册的BeanFactoryPostProcessor
+
+    // 用于存储实例化beanFactory后置处理器的beanName
+    Set<String> processedBeans = new HashSet<>();
+
+    // 如果该beanFactory具有注册bean定义功能的话，可以完成BeanDefinitionRegistryPostProcessor接口的事情。
+    if (beanFactory instanceof BeanDefinitionRegistry) {
+        BeanDefinitionRegistry registry = (BeanDefinitionRegistry) beanFactory;
+        // 用于存储一般的factory后置处理器
+        List<BeanFactoryPostProcessor> regularPostProcessors = new ArrayList<>();
+
+        // BeanDefinitionRegistryPostProcessor继承自BeanFactoryPostProcessor。具有一个新的方法postProcessBeanDefinitionRegistry
+        // 根据注释，这些factory后置处理器（更准确的说叫bean定义注册后置处理器）在BeanFactoryPostProcessor之前调用，主要用途在于可以注册一些特殊的bean定义，比如定义新的BeanFactoryPostProcessor的bean定义或者处理@Bean这种注册方式（ConfigurationClassPostProcessor就是这么做的）
+        List<BeanDefinitionRegistryPostProcessor> registryProcessors = new ArrayList<>();
+
+        // 对手动注册的beanFactory后置处理器分类为BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor。且直接执行BeanDefinitionRegistryPostProcessor的postProcessBeanDefinitionRegistry方法来注册新的bean定义
+        for (BeanFactoryPostProcessor postProcessor : beanFactoryPostProcessors) {
+            if (postProcessor instanceof BeanDefinitionRegistryPostProcessor) {
+                BeanDefinitionRegistryPostProcessor registryProcessor =
+                    (BeanDefinitionRegistryPostProcessor) postProcessor;
+                // 直接注册新的bean定义
+                registryProcessor.postProcessBeanDefinitionRegistry(registry);
+                registryProcessors.add(registryProcessor);
+            }
+            else {
+                regularPostProcessors.add(postProcessor);
+            }
+        }
+
+        // 用于存储已经在beanDefinitionMap中注册的BeanDefinitionRegistryPostProcessor
+        List<BeanDefinitionRegistryPostProcessor> currentRegistryProcessors = new ArrayList<>();
+
+        // 先找到根据PriorityOrdered排序的BeanDefinitionRegistryPostProcessor，将其实例化（getBean方法）
+        String[] postProcessorNames =
+            beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+        for (String ppName : postProcessorNames) {
+            if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+                currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+                processedBeans.add(ppName);
+            }
+        }
+        // 排序
+        sortPostProcessors(currentRegistryProcessors, beanFactory);
+        registryProcessors.addAll(currentRegistryProcessors);
+        // 执行注册新的bean定义
+        invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry, beanFactory.getApplicationStartup());
+        currentRegistryProcessors.clear();
+
+        // 再找到根据Ordered排序的BeanDefinitionRegistryPostProcessor，将其实例化，后续一样
+        // 重新调用getBeanNamesForType是因为刚才注册的bean定义可能也是BeanDefinitionRegistryPostProcessor
+        postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+        for (String ppName : postProcessorNames) {
+            // 已经被处理过的就不处理了
+            if (!processedBeans.contains(ppName) && beanFactory.isTypeMatch(ppName, Ordered.class)) {
+                currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+                processedBeans.add(ppName);
+            }
+        }
+        sortPostProcessors(currentRegistryProcessors, beanFactory);
+        registryProcessors.addAll(currentRegistryProcessors);
+        invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry, beanFactory.getApplicationStartup());
+        currentRegistryProcessors.clear();
+
+        // 最后找到其他BeanDefinitionRegistryPostProcessor，将其实例化并执行注册bean定义的方法
+        // 注意到每次有新的BeanDefinitionRegistryPostProcessor被实例化reiterate就变成true，这是因为被实例化的BeanDefinitionRegistryPostProcessor注册的新bean定义可能还是BeanDefinitionRegistryPostProcessor，要反复进行确认，防止遗漏。
+        boolean reiterate = true;
+        while (reiterate) {
+            reiterate = false;
+            postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+            for (String ppName : postProcessorNames) {
+                if (!processedBeans.contains(ppName)) {
+                    currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+                    processedBeans.add(ppName);
+                    reiterate = true;
+                }
+            }
+            sortPostProcessors(currentRegistryProcessors, beanFactory);
+            registryProcessors.addAll(currentRegistryProcessors);
+            invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry, beanFactory.getApplicationStartup());
+            currentRegistryProcessors.clear();
+        }
+
+        // 处理完BeanDefinitionRegistryPostProcessor注册新bean定义功能，现在处理它进行修改beanFactory的功能。
+        invokeBeanFactoryPostProcessors(registryProcessors, beanFactory);
+        invokeBeanFactoryPostProcessors(regularPostProcessors, beanFactory);
+    }
+
+    else {
+        // 如果beanFactory不支持注册功能，只用处理手动注册的后置处理器
+        invokeBeanFactoryPostProcessors(beanFactoryPostProcessors, beanFactory);
+    }
+    // ......
+}
+```
+
+上面是第一部分，已经用注释将大致做的事情标注出来了，应该不难看懂。现在来简单总结一下第一部分干了什么事情：
+
+1. 将手动注册的`BeanFactoryPostProcessor`的子类`BeanDefinitionRegistryPostProcessor`分离出来。
+2. 直接执行`BeanDefinitionRegistryPostProcessor`的注册新bean定义功能。
+3. 按照`PriorityOrdered`、`Ordered`、无排序的顺序分别获取`BeanDefinitionRegistryPostProcessor`，并执行它们的注册新bean定义的功能
+4. 如此处理完`BeanDefinitionRegistryPostProcessor`之后再处理其父类中修改`beanFactory`的功能。
+
+可以发现这一部分主要处理的是
+
+- 手动注册的后置处理器
+- 实现了接口为`BeanDefinitionRegistryPostProcessor`的后置处理器
+
+还有很多仅实现接口为`BeanFactoryPostProcessor`的没有处理，那么不难猜测第二部分就是干这件事了：
+
+```java
+// ...
+// 获取BeanFactoryPostProcessor，开始处理剩下的BeanFactoryPostProcessor
+// BeanFactoryPostProcessor接口不存在注册新bean的能力，所以只需要取一次处理即可
+String[] postProcessorNames =
+    beanFactory.getBeanNamesForType(BeanFactoryPostProcessor.class, true, false);
+
+// 为什么这里实现了PriorityOrdered的处理过程被跳步了，咱也不知道
+List<BeanFactoryPostProcessor> priorityOrderedPostProcessors = new ArrayList<>();
+List<String> orderedPostProcessorNames = new ArrayList<>();
+List<String> nonOrderedPostProcessorNames = new ArrayList<>();
+for (String ppName : postProcessorNames) {
+    if (processedBeans.contains(ppName)) {
+        // 已经被当成BeanDefinitionRegistryPostProcessor实例化过的就忽略掉
+    }
+    // PriorityOrdered继承自Ordered，所以这些选择语句是else if并且PriorityOrdered在先处理
+    else if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+        priorityOrderedPostProcessors.add(beanFactory.getBean(ppName, BeanFactoryPostProcessor.class));
+    }
+    else if (beanFactory.isTypeMatch(ppName, Ordered.class)) {
+        orderedPostProcessorNames.add(ppName);
+    }
+    else {
+        nonOrderedPostProcessorNames.add(ppName);
+    }
+}
+
+// 按顺序处理BeanFactoryPostProcessor
+sortPostProcessors(priorityOrderedPostProcessors, beanFactory);
+invokeBeanFactoryPostProcessors(priorityOrderedPostProcessors, beanFactory);
+List<BeanFactoryPostProcessor> orderedPostProcessors = new ArrayList<>(orderedPostProcessorNames.size());
+for (String postProcessorName : orderedPostProcessorNames) {
+    orderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));
+}
+sortPostProcessors(orderedPostProcessors, beanFactory);
+invokeBeanFactoryPostProcessors(orderedPostProcessors, beanFactory);
+List<BeanFactoryPostProcessor> nonOrderedPostProcessors = new ArrayList<>(nonOrderedPostProcessorNames.size());
+for (String postProcessorName : nonOrderedPostProcessorNames) {
+    nonOrderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));
+}
+invokeBeanFactoryPostProcessors(nonOrderedPostProcessors, beanFactory);
+
+// 该方法之前见过，每次bean定义修改之后都要执行的清除Type相关缓存方法 
+beanFactory.clearMetadataCache();
+```
+
+在第一部分的基础上，第二部分就很好读了。
+
+至此，所有的beanFactory后置处理器也就处理完了。
+
+#### 3.6 第四部分——Bean后置处理器
+
+完成了`beanFactory`后置处理器的处理之后，接下来就是`refresh`的下一行
+
+```java
+registerBeanPostProcessors(beanFactory);
+// 点进去是这个：
+protected void registerBeanPostProcessors(ConfigurableListableBeanFactory beanFactory) {
+    PostProcessorRegistrationDelegate.registerBeanPostProcessors(beanFactory, this);
+}
+```
 
