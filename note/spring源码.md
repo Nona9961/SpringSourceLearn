@@ -1619,10 +1619,10 @@ beanFactory.setBeanClassLoader(getClassLoader());
    BeanDefinition getMergedBeanDefinition(String beanName) throws NoSuchBeanDefinitionException;
    ```
 
-   这几个方法和bean元数据相关，根据注释这里的元数据主要是合并bean定义（mergedBeanDefinition）
+   这几个方法和bean元数据相关，根据注释这里的元数据主要是合并bean定义（`mergedBeanDefinition`但并没有这个类，它一般是由`RootBeanDefinition`直接表示）
 
-   - 主要针对父子bean，子bean定义（ChildBeanDefiition）加上父bean定义（RootBeanDefinition）的缺省信息组合而成。
-   - 此外合并bean定义是原始bean定义的处理副本
+   - 主要针对父子bean，子bean定义（`ChildBeanDefiition`）加上父bean定义（`RootBeanDefinition`）的缺省信息组合而成。
+   - 此外合并bean定义是原始bean定义的处理副本：Spring在创建bean实例的时候使用的bean定义副本。
    - 如果方法`isCacheBeanMetadata();`返回的是false，那么这意味着该`beanFactory`不缓存`mergedBeanDefinition`，每次创建bean实例的时候都会重新查询bean class来确定这个bean的类型。
    - `getMergedBeanDefinition()`就是从上述的合并bean定义缓存里拿取bean定义，如果关闭了缓存就从`beanDefinitionMap`里面拿，并且不进行缓存。
 
@@ -2083,7 +2083,7 @@ public static void invokeBeanFactoryPostProcessors(
 上面是第一部分，已经用注释将大致做的事情标注出来了，应该不难看懂。现在来简单总结一下第一部分干了什么事情：
 
 1. 将手动注册的`BeanFactoryPostProcessor`的子类`BeanDefinitionRegistryPostProcessor`分离出来。
-2. 直接执行`BeanDefinitionRegistryPostProcessor`的注册新bean定义功能。
+2. 直接执行`BeanDefinitionRegistryPostProcessor`的注册新bean定义功能——> 此时可以将方法上`@Bean`之类的bean定义加入进来
 3. 按照`PriorityOrdered`、`Ordered`、无排序的顺序分别获取`BeanDefinitionRegistryPostProcessor`，并执行它们的注册新bean定义的功能
 4. 如此处理完`BeanDefinitionRegistryPostProcessor`之后再处理其父类中修改`beanFactory`的功能。
 
@@ -2092,7 +2092,7 @@ public static void invokeBeanFactoryPostProcessors(
 - 手动注册的后置处理器
 - 实现了接口为`BeanDefinitionRegistryPostProcessor`的后置处理器
 
-还有很多仅实现接口为`BeanFactoryPostProcessor`的没有处理，那么不难猜测第二部分就是干这件事了：
+还有很多仅实现接口为`BeanFactoryPostProcessor`的后置处理器没有处理，那么不难猜测第二部分就是干这件事了：
 
 ```java
 // ...
@@ -2142,6 +2142,8 @@ beanFactory.clearMetadataCache();
 
 在第一部分的基础上，第二部分就很好读了。
 
+最后，在这个方法的开头就给出了为什么这个方法特别长，有大量list和循环，感觉起来很容易重构————这是为了保证此时不序列化和按顺序执行各个后置处理器。
+
 至此，所有的beanFactory后置处理器也就处理完了。
 
 #### 3.6 第四部分——Bean后置处理器
@@ -2155,4 +2157,147 @@ protected void registerBeanPostProcessors(ConfigurableListableBeanFactory beanFa
     PostProcessorRegistrationDelegate.registerBeanPostProcessors(beanFactory, this);
 }
 ```
+
+果然还是给了`PostProcessorRegistrationDelegate`这个委托类。进入`registerBeanPostProcessors`方法
+
+```java
+public static void registerBeanPostProcessors(
+    ConfigurableListableBeanFactory beanFactory, AbstractApplicationContext applicationContext) {
+    // 获取bean定义中所有实现了BeanPostProcessor接口的beanName
+    String[] postProcessorNames = beanFactory.getBeanNamesForType(BeanPostProcessor.class, true, false);
+
+    // BeanPostProcessor全部实例化应该有个bean数量，式子里面的+1是因为下一行直接注册的logger
+    int beanProcessorTargetCount = beanFactory.getBeanPostProcessorCount() + 1 + postProcessorNames.length;
+    // 直接注册BeanPostProcessorChecker这个bean后置处理器，它的作用是如果在执行注册bean后置处理器方法（就是本方法）时，正好有bean在被创建的话，这个bean将无法回调所有的bean后置处理器（因为还有部分bean后置处理器还没有被注册），就需要这个checker用日志的方式记录下来
+    beanFactory.addBeanPostProcessor(new BeanPostProcessorChecker(beanFactory, beanProcessorTargetCount));
+
+    // 和beanFactory后置处理器一样，按照PriorityOrdered，Ordered，无顺序分类
+    List<BeanPostProcessor> priorityOrderedPostProcessors = new ArrayList<>();
+    List<BeanPostProcessor> internalPostProcessors = new ArrayList<>();
+    List<String> orderedPostProcessorNames = new ArrayList<>();
+    List<String> nonOrderedPostProcessorNames = new ArrayList<>();
+    for (String ppName : postProcessorNames) {
+        if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+            BeanPostProcessor pp = beanFactory.getBean(ppName, BeanPostProcessor.class);
+            priorityOrderedPostProcessors.add(pp);
+            // 如果该bean后置处理器是MergedBeanDefinitionPostProcessor的话，特别地将其放到一个特别的list中。
+            if (pp instanceof MergedBeanDefinitionPostProcessor) {
+                internalPostProcessors.add(pp);
+            }
+        }
+        else if (beanFactory.isTypeMatch(ppName, Ordered.class)) {
+            orderedPostProcessorNames.add(ppName);
+        }
+        else {
+            nonOrderedPostProcessorNames.add(ppName);
+        }
+    }
+
+    // 先排序，再注册
+    sortPostProcessors(priorityOrderedPostProcessors, beanFactory);
+    registerBeanPostProcessors(beanFactory, priorityOrderedPostProcessors);
+    List<BeanPostProcessor> orderedPostProcessors = new ArrayList<>(orderedPostProcessorNames.size());
+    for (String ppName : orderedPostProcessorNames) {
+        BeanPostProcessor pp = beanFactory.getBean(ppName, BeanPostProcessor.class);
+        orderedPostProcessors.add(pp);
+        if (pp instanceof MergedBeanDefinitionPostProcessor) {
+            internalPostProcessors.add(pp);
+        }
+    }
+    sortPostProcessors(orderedPostProcessors, beanFactory);
+    registerBeanPostProcessors(beanFactory, orderedPostProcessors);
+    List<BeanPostProcessor> nonOrderedPostProcessors = new ArrayList<>(nonOrderedPostProcessorNames.size());
+    for (String ppName : nonOrderedPostProcessorNames) {
+        BeanPostProcessor pp = beanFactory.getBean(ppName, BeanPostProcessor.class);
+        nonOrderedPostProcessors.add(pp);
+        if (pp instanceof MergedBeanDefinitionPostProcessor) {
+            internalPostProcessors.add(pp);
+        }
+    }
+    registerBeanPostProcessors(beanFactory, nonOrderedPostProcessors);
+
+    // 在之前注册MergedBeanDefinitionPostProcessor时，每一类都是加入internalPostProcessors之后再排序的，现在要重新排序以保证
+    // 小值在先且PriorityOrdered > Ordered > 无顺序的顺序。
+    // registerBeanPostProcessors方法对于重复的bean后置处理器会将其移至最后面（先remove再add）
+    sortPostProcessors(internalPostProcessors, beanFactory);
+    registerBeanPostProcessors(beanFactory, internalPostProcessors);
+	// 将ApplicationListenerDetector放到最后面
+    beanFactory.addBeanPostProcessor(new ApplicationListenerDetector(applicationContext));
+}
+```
+
+可以发现`BeanPostProcessor`的注册方式和`BeanFactoryPostProcessor`的应用方式都很像，这是因为它们都要保证显式声明的顺序。
+
+该方法中出现了一个新的接口`MergedBeanDefinitionPostProcessor`被特殊处理，现在来看看该接口干了什么事情。
+
+进入该接口看UML图发现它时顶级接口`BeanPostProcessor`的直接子接口，那么看看注释:
+
+- 在创建bean实例时专门用于处理合并bean定义的接口（还记得我们说过合并bean定义是Spring创建bean时用的bean定义副本吗）
+- **定义在该接口的方法`postProcessMergedBeanDefinition`会在实例化bean之前进行调用**（比bean后置处理器的`postProcessBeforeInitialization`还要之前，毕竟是对合并bean定义做操作）
+- 这个方法可以做缓存bean定义中的一些元数据，也可以对该合并bean定义进行修改（也只能修改合并bean定义，如果要对原始bean定义修改的话，考虑`BeanFactoryPostProcessor`）
+
+说完了`MergedBeanDefinitionPostProcessor`，我们再谈谈最后出现的`ApplicationListenerDetector`，作为少有的`BeanPostProcessor`直接例子（之前的研究很多程度上都是给予抽象类、接口的），我们应该研究一下，进入该类看看。
+
+查看UML图，发现它实现的`DestructionAwareBeanPostProcessor`,` MergedBeanDefinitionPostProcessor`都是`BeanPostProcessor`的子接口。刚才我们才认识了`MergedBeanDefinitionPostProcessor`。那就直接进入`DestructionAwareBeanPostProcessor`里面看一下。
+
+根据注释`DestructionAwareBeanPostProcessor`添加了销毁bean实例前的回调方法`postProcessBeforeDestruction`。
+
+那么不论是`DestructionAwareBeanPostProcessor`还是`MergedBeanDefinitionPostProcessor`其实都是**拓展了原有`BeanPostProcessor`的声明周期方法**
+
+可以猜测，除开这俩以外还有更多的生命周期方法被拓展。
+
+不过现在还是回到`ApplicationListenerDetector`来，根据实现的接口我们现在知道的是：
+
+- 在合并bean定义处进行了拓展——如果合并bean定义创建出来的bean是`ApplicationListener`，将该beanName记录在singletonNames中
+- 实例化前进行了拓展——不做处理
+- 实例化后进行了拓展——如果进来的bean确实是`ApplicationListener`且在singletonNames中，还是单例，那么注册进监听器中
+- 销毁前进行了拓展——从`ApplicationEventMulticaster(发布事件的)`中删除该监听器
+
+再看注释：
+
+> ApplicationListenerDetector是用来检测实现了ApplicationListener接口的bean（监听器），它可以检测到getBeanNamesForType()获取不到的bean
+
+简单来说就是用来补充监听器bean的检测，`getBeanNamesForType`方法上面明确指出了：该方法只查询顶层的bean，此时inner bean就不会被找到。所以`ApplicationListenerDetector`才在所有`BeanPostProcessor`的最后以保证所有实现了`ApplicationListener`接口的监听器都被探测到。
+
+- 事实上还有`@EventListener`注册的监听器，这个类无法处理该注解…………这意味着这部分监听器还有其他的注册渠道。
+
+总之，`BeanPostProcessor`是对bean实例化生命周期的一个拓展接口，**其子接口也有很多值得一提的内容**，但这里还是先跳过吧。
+
+#### 3.7 第五部分——注册一些特殊bean
+
+之前我们的进度到了注册bean后置处理器，现在我们来继续看看后续的步骤：
+
+```java
+// ......
+// 为该Context初始化MessageSource
+initMessageSource();
+
+// 为该Context初始化evnet广播
+initApplicationEventMulticaster();
+
+// 子类实现来初始化一些特殊的bean——>用于拓展.
+onRefresh();
+
+// 注册监听器.
+registerListeners();
+// ......
+```
+
+我们一个个来看：
+
+1. `initMessageSource();`方法，顾名思义初始化`MessageSource`的方法。这个`MessageSource`是个什么东西？进去看看
+
+   根据注释，这个接口是为了动态国际化消息而出现的，其中**动态**指的是消息内容由动态决定，国际化就不用说了吧。
+
+   ```java
+   String getMessage(String code, @Nullable Object[] args, @Nullable String defaultMessage, Locale locale);
+   ```
+
+   以第一个方法为例，code来取某个字符串模板，比如`"hello {0}"`，而args就是填充前面那个{0}的。这就完成了动态。而locale表明了地区/区域，来完成国际化。
+
+   整个方法设计和Jdk的`ResourceBoundle`类类似这个类是jdk提供的用于国际化的类，在它的基础上又引入了`MessageFormat`的思想，用于动态填充消息模板。
+
+   事实上`ResourceBundleMessageSource`作为Spring自己的一个`MessageSource`实现，就是基于上述2个类完成的。
+
+2. 
 
