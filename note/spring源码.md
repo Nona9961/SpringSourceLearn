@@ -2299,5 +2299,91 @@ registerListeners();
 
    事实上`ResourceBundleMessageSource`作为Spring自己的一个`MessageSource`实现，就是基于上述2个类完成的。
 
-2. 
+   在了解了`MessageSource`接口有什么用后，我们再来看这个方法干了什么事情
+
+   ```java
+   protected void initMessageSource() {
+       ConfigurableListableBeanFactory beanFactory = getBeanFactory();
+       // 有没有注册了叫messageSource的bean
+       if (beanFactory.containsLocalBean(MESSAGE_SOURCE_BEAN_NAME)) {
+           // 如果注册了，现在直接初始化
+           this.messageSource = beanFactory.getBean(MESSAGE_SOURCE_BEAN_NAME, MessageSource.class);
+           // 存在父context且该messageSource具有父子层级结构（来着接口HierarchicalMessageSource）
+           if (this.parent != null && this.messageSource instanceof HierarchicalMessageSource) {
+               HierarchicalMessageSource hms = (HierarchicalMessageSource) this.messageSource;
+               if (hms.getParentMessageSource() == null) {
+                   hms.setParentMessageSource(getInternalParentMessageSource());
+               }
+           }
+           if (logger.isTraceEnabled()) {
+               logger.trace("Using MessageSource [" + this.messageSource + "]");
+           }
+       }
+       else {
+           // 如果没有注册bean，那么spring自己帮你创建一个默认的把所有工作都丢给父MessageScorce做（当然如果没有父MessageSource就什么都不做）
+           DelegatingMessageSource dms = new DelegatingMessageSource();
+           dms.setParentMessageSource(getInternalParentMessageSource());
+           this.messageSource = dms;
+           // 以registerSingleton()的方式注册该bean，这种注册方式不会走任何bean生命周期函数
+           beanFactory.registerSingleton(MESSAGE_SOURCE_BEAN_NAME, this.messageSource);
+           if (logger.isTraceEnabled()) {
+               logger.trace("No '" + MESSAGE_SOURCE_BEAN_NAME + "' bean, using [" + this.messageSource + "]");
+           }
+       }
+   }
+   ```
+
+   简单过了这个方法，我们看下一个
+
+2. `initApplicationEventMulticaster()`方法：顾名思义，这是初始化事件多路广播器的方法，很明显这与观察者模式有关（应该知道Spring自己用**ApplicationListener**、**ApplicationEvent**、**ApplicationEventPublisher**完成观察者模式）。不管如何看源码：
+
+   ```java
+   protected void initApplicationEventMulticaster() {
+       ConfigurableListableBeanFactory beanFactory = getBeanFactory();
+       if (beanFactory.containsLocalBean(APPLICATION_EVENT_MULTICASTER_BEAN_NAME)) {
+           this.applicationEventMulticaster =
+               beanFactory.getBean(APPLICATION_EVENT_MULTICASTER_BEAN_NAME, ApplicationEventMulticaster.class);
+           if (logger.isTraceEnabled()) {
+               logger.trace("Using ApplicationEventMulticaster [" + this.applicationEventMulticaster + "]");
+           }
+       }
+       else {
+           this.applicationEventMulticaster = new SimpleApplicationEventMulticaster(beanFactory);
+           beanFactory.registerSingleton(APPLICATION_EVENT_MULTICASTER_BEAN_NAME, this.applicationEventMulticaster);
+           if (logger.isTraceEnabled()) {
+               logger.trace("No '" + APPLICATION_EVENT_MULTICASTER_BEAN_NAME + "' bean, using " +
+                            "[" + this.applicationEventMulticaster.getClass().getSimpleName() + "]");
+           }
+       }
+   }
+   ```
+
+   这个方法也很简单，与上面对messageSource做的事情类似：
+
+   - 如果bean定义中有名为`applicationEventMulticaster`的bean，直接初始化它并且设置其为`Context`内部字段`applicationEventMulticaster`的值。
+   - 如果bean定义中没有这个bean，就用spring自己实现的`SimpleApplicationEventMulticaster`来注册这个bean
+
+   在之前的探究中，我们不止一次地遇到了对`ApplicationListener`的处理，监听器（观察者）很明显也是和观察者模式有关的，所以这里我们看一下`ApplicationEventMulticaster`。
+
+   **如果之前对观察者模式没有什么了解的话，可以先去看看这个很重要的设计模式**
+
+   进入接口`ApplicationEventPublisher`，老规矩发现没有继承自谁就直接看注释：
+
+   > 实现该接口的类应该可以管理`ApplicationListener`（监听器），并且将一个个的`ApplicationEvent`（事件）发布给这些`ApplicationListener`
+
+   可以发现这就是一个事件的分发器，看看这个接口的方法就发现前7个方法都是增删（也就是管理）监听器的；后两个方法是分发事件的。
+
+   此外，注释里面还提到：
+
+   > `ApplicationEventPublisher`（事件广播器，一般来说`ApplicationContext`继承了它）的推送方法可以委托给该接口来完成。
+
+   都这么写了，那么spring官方publishEvent()的方式应该就是委托给该分发器了。
+
+   此时已经初始化了部分**监听器**和**分发器**了，那么估计后面就有发布事件的内容了。
+
+3. `onRefresh()`方法，注释说该方法是一个子类实现的模板方法，用于初始化一些特殊的bean，默认是空实现——又是一个便于拓展的模板方法
+
+4. `registerListeners()`方法，直接看注释：
+
+   
 
