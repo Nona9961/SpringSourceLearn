@@ -1339,12 +1339,15 @@ protected void prepareRefresh() {
     	// validateRequiredProperties()验证必要的环境信息是否可以被解析且不为null
 		getEnvironment().validateRequiredProperties();
 
-		// 这个用于存refresh之前的监听器
+		// 这个用于存refresh之前的早期监听器，逻辑如下：
+    	// 在refresh之前注册的监听器都在this.applicationListeners里，刚启动的时候this.earlyApplicationListeners为null
+    	// refresh之前的监听器都是早期监听器，之后可能再次refresh，所以需要this.earlyApplicationListeners记录哪些是refresh之前就该有的监听器
+    	// 也就是说this.earlyApplicationListeners只做记录，此后再也不改变
 		if (this.earlyApplicationListeners == null) {
 			this.earlyApplicationListeners = new LinkedHashSet<>(this.applicationListeners);
 		}
 		else {
-			// 将本地监听器设置为refresh之前的状态
+			// 再次refresh的话，将此时的监听器列表替换为早期监听器列表，保证refresh之前状态一致
 			this.applicationListeners.clear();
 			this.applicationListeners.addAll(this.earlyApplicationListeners);
 		}
@@ -2221,7 +2224,7 @@ public static void registerBeanPostProcessors(
     // registerBeanPostProcessors方法对于重复的bean后置处理器会将其移至最后面（先remove再add）
     sortPostProcessors(internalPostProcessors, beanFactory);
     registerBeanPostProcessors(beanFactory, internalPostProcessors);
-	// 将ApplicationListenerDetector放到最后面
+	// 将ApplicationListenerDetector放到最后面——这是我们第二次见到它了，第一次是在prepareBeanFactory方法中
     beanFactory.addBeanPostProcessor(new ApplicationListenerDetector(applicationContext));
 }
 ```
@@ -2259,7 +2262,15 @@ public static void registerBeanPostProcessors(
 
 简单来说就是用来补充监听器bean的检测，`getBeanNamesForType`方法上面明确指出了：该方法只查询顶层的bean，此时inner bean就不会被找到。所以`ApplicationListenerDetector`才在所有`BeanPostProcessor`的最后以保证所有实现了`ApplicationListener`接口的监听器都被探测到。
 
+- 如果记忆力比较好的话，这个时候应该会返回`prepareBeanFactory()`方法，因为在那个方法里面我们就已经**提前注册了整个beanFactory中的前两个bean后置处理器：**
+
+  - `ApplicationContextAwareProcessor`
+  - `ApplicationListenerDetector`
+
+  这其实就是为了保证在beanFactory后置处理器特殊初始化的bean如果是实现了`Aware`接口或`ApplicationListener`接口的，能够有相应的处理器进行处理。
+
 - 事实上还有`@EventListener`注册的监听器，这个类无法处理该注解…………这意味着这部分监听器还有其他的注册渠道。
+
 
 总之，`BeanPostProcessor`是对bean实例化生命周期的一个拓展接口，**其子接口也有很多值得一提的内容**，但这里还是先跳过吧。
 
@@ -2371,7 +2382,7 @@ registerListeners();
 
    > 实现该接口的类应该可以管理`ApplicationListener`（监听器），并且将一个个的`ApplicationEvent`（事件）发布给这些`ApplicationListener`
 
-   可以发现这就是一个事件的分发器，看看这个接口的方法就发现前7个方法都是增删（也就是管理）监听器的；后两个方法是分发事件的。
+   可以发现这就是一个**事件的分发器**，看看这个接口的方法就发现前7个方法都是**增删（也就是管理）监听器**的；后两个方法是**分发事件**的。
 
    此外，注释里面还提到：
 
@@ -2385,5 +2396,319 @@ registerListeners();
 
 4. `registerListeners()`方法，直接看注释：
 
+   > 添加实现了`ApplicationListener`接口的bean
    
+   可以看出，这个方法就是用于注册监听器的。
+   
+   ```java
+   protected void registerListeners() {
+       // 先注册静态（就是早期和beanFactory后置处理器中初始化）的监听器
+       for (ApplicationListener<?> listener : getApplicationListeners()) {
+           getApplicationEventMulticaster().addApplicationListener(listener);
+       }
+   
+       // 对实现了ApplicationListener接口的bean注册进分发器中
+       String[] listenerBeanNames = getBeanNamesForType(ApplicationListener.class, true, false);
+       for (String listenerBeanName : listenerBeanNames) {
+           getApplicationEventMulticaster().addApplicationListenerBean(listenerBeanName);
+       }
+   
+       // 发布早期事件
+       Set<ApplicationEvent> earlyEventsToProcess = this.earlyApplicationEvents;
+       this.earlyApplicationEvents = null;
+       if (!CollectionUtils.isEmpty(earlyEventsToProcess)) {
+           for (ApplicationEvent earlyEvent : earlyEventsToProcess) {
+               getApplicationEventMulticaster().multicastEvent(earlyEvent);
+           }
+       }
+   }
+   ```
+   
+   **然而没想到它最后还发布了早期事件——如果有需要的话，可以在refresh之前注册相应的早期事件和早期监听器，此时（初始化所有其他bean之前）会发布这些早期事件，可以处理一些内容。**
+
+到此为止，`refresh`中所有特殊debean都被实例完了——国际化、分发器、监听器主要就是这三种。接下来就是初始化其他所有的bean了。
+
+#### 3.8 第六部分——初始化其他所有bean
+
+看到这个标题我想很多人应该会比较开心，因为这意味着我们终于到了核心的初始化过程了，这也是我们探索`refresh`方法的初衷（主线）……就是不知道大家还记得到吗？
+
+```java
+// ...
+// 实例化所有剩下的（非懒加载）的单例
+finishBeanFactoryInitialization(beanFactory);
+// ...
+```
+
+直接进入（看注释这种事情我就不强调了）
+
+```java
+protected void finishBeanFactoryInitialization(ConfigurableListableBeanFactory beanFactory) {
+    // 如果注册了用于类型转换的ConversionService（之前见过）bean，那么首先初始化它并且配置到beanFactory中
+    if (beanFactory.containsBean(CONVERSION_SERVICE_BEAN_NAME) &&
+        beanFactory.isTypeMatch(CONVERSION_SERVICE_BEAN_NAME, ConversionService.class)) {
+        beanFactory.setConversionService(
+            beanFactory.getBean(CONVERSION_SERVICE_BEAN_NAME, ConversionService.class));
+    }
+
+	// 如果在beanFactory后置处理器中没有配置beanFactory的用于解析注解字符串的bean的话，此时给一个默认的解析器
+    if (!beanFactory.hasEmbeddedValueResolver()) {
+        beanFactory.addEmbeddedValueResolver(strVal -> getEnvironment().resolvePlaceholders(strVal));
+    }
+
+    // 首先初始化AOP相关内容的bean（实现了LoadTimeWeaverAware，可以持有LoadTimeWeaverAware实例），如果没有就不管了
+    String[] weaverAwareNames = beanFactory.getBeanNamesForType(LoadTimeWeaverAware.class, false, false);
+    for (String weaverAwareName : weaverAwareNames) {
+        getBean(weaverAwareName);
+    }
+
+    beanFactory.setTempClassLoader(null);
+
+    // 认为不再有bean定义会被改变了，冻结beanFactory
+    beanFactory.freezeConfiguration();
+
+    // 真正实例化bean的方法
+    beanFactory.preInstantiateSingletons();
+}
+```
+
+这部分内容比较简单，都是在`ConfigurableListableBeanFactory`中见过的方法，我们直接将目光移到最后的方法上，它的默认实现方法在`DefaultListableBeanFactory`里面，这里面大量涉及到以前的内容，现在来看看源码
+
+```java
+public void preInstantiateSingletons() throws BeansException {
+    if (logger.isTraceEnabled()) {
+        logger.trace("Pre-instantiating singletons in " + this);
+    }
+	// 使用bean定义names的副本，不知道为什么要这么做
+    List<String> beanNames = new ArrayList<>(this.beanDefinitionNames);
+
+    for (String beanName : beanNames) {
+        // 获取合并bean定义——内部逻辑是如果没有合并bean定义，就从bean定义里面获取，再缓存进合并bean定义内
+        RootBeanDefinition bd = getMergedLocalBeanDefinition(beanName);
+        // 只初始化具体、单例、非懒加载的bean
+        if (!bd.isAbstract() && bd.isSingleton() && !bd.isLazyInit()) {
+            // 该bean是不是FactoryBean（在2.1 BeanDefinition和bean中提过，应该有影响吧）
+            if (isFactoryBean(beanName)) {
+                // factoryBean的beanName与它要创建的实例就差一个&，即FACTORY_BEAN_PREFIX
+                // 现在先初始化该factoryBean
+                Object bean = getBean(FACTORY_BEAN_PREFIX + beanName);
+                if (bean instanceof FactoryBean) {
+                    FactoryBean<?> factory = (FactoryBean<?>) bean;
+                    boolean isEagerInit;
+                    // 通过jvm获取该FactoryBean创建的实例是不是立刻被初始化
+                    if (System.getSecurityManager() != null && factory instanceof SmartFactoryBean) {
+                        isEagerInit = AccessController.doPrivileged(
+                            (PrivilegedAction<Boolean>) ((SmartFactoryBean<?>) factory)::isEagerInit,
+                            getAccessControlContext());
+                    }
+                    // 不通过jvm来获取
+                    else {
+                        isEagerInit = (factory instanceof SmartFactoryBean &&
+                                       ((SmartFactoryBean<?>) factory).isEagerInit());
+                    }
+                    // 如果确实要被立刻初始化，这就初始化
+                    if (isEagerInit) {
+                        getBean(beanName);
+                    }
+                }
+            }
+            else {
+                // 初始化这个bean
+                getBean(beanName);
+            }
+        }
+    }
+	// 对实现了SmartInitializingSingleton接口的bean，此时调用它的回调方法
+    for (String beanName : beanNames) {
+        Object singletonInstance = getSingleton(beanName);
+        if (singletonInstance instanceof SmartInitializingSingleton) {
+            StartupStep smartInitialize = this.getApplicationStartup().start("spring.beans.smart-initialize")
+                .tag("beanName", beanName);
+            SmartInitializingSingleton smartSingleton = (SmartInitializingSingleton) singletonInstance;
+            if (System.getSecurityManager() != null) {
+                AccessController.doPrivileged((PrivilegedAction<Object>) () -> {
+                    smartSingleton.afterSingletonsInstantiated();
+                    return null;
+                }, getAccessControlContext());
+            }
+            else {
+                smartSingleton.afterSingletonsInstantiated();
+            }
+            smartInitialize.end();
+        }
+    }
+}
+```
+
+可以看到这个方法的核心就是` getBean(beanName)`，这里我们还没有介绍到，不过也有很多可以谈的地方：
+
+1. 果然，初始化bean是从bean定义入手的
+2. `FactoryBean`是特殊的bean实锤了，可以看到创建的bean是该工厂（`FactoryBean`），而不是这个工厂`getObject`返回的实例
+3. 在所有bean被创建完成（bean后置处理器已经被调用）之后还有一个回调的地方——就是实现了`SmartInitializingSingleton`接口的bean。
+   - 注意到只有在`refresh()`方法才有这一段，所以在之前特殊初始化的bean，不会走这个回调。
+
+那么，我们就看看核心方法吧：
+
+```java
+public Object getBean(String name) throws BeansException {
+    return doGetBean(name, null, null, false);
+}
+// 上面那个我们就简单略过		
+// spring中有很多喜欢用do+xxx命名来表示真正做某事的命名方式————好不好仁者见仁吧
+// 后面三个参数记得是 null、null、false
+protected <T> T doGetBean(
+    String name, @Nullable Class<T> requiredType, @Nullable Object[] args, boolean typeCheckOnly)
+    throws BeansException {
+	// 返回规范bean名：去掉FactoryBean的&前缀，将别名换成规范名
+    String beanName = transformedBeanName(name);
+    Object beanInstance;
+	
+    // 是否已经被创建过了，如果已经创建过了，就直接返回创建过的bean
+    Object sharedInstance = getSingleton(beanName);
+    if (sharedInstance != null && args == null) {
+        if (logger.isTraceEnabled()) {
+            if (isSingletonCurrentlyInCreation(beanName)) {
+                logger.trace("Returning eagerly cached instance of singleton bean '" + beanName +
+                             "' that is not fully initialized yet - a consequence of a circular reference");
+            }
+            else {
+                logger.trace("Returning cached instance of singleton bean '" + beanName + "'");
+            }
+        }
+        // 
+        beanInstance = getObjectForBeanInstance(sharedInstance, name, beanName, null);
+    }
+
+    else {
+        // Fail if we're already creating this bean instance:
+        // We're assumably within a circular reference.
+        if (isPrototypeCurrentlyInCreation(beanName)) {
+            throw new BeanCurrentlyInCreationException(beanName);
+        }
+
+        // Check if bean definition exists in this factory.
+        BeanFactory parentBeanFactory = getParentBeanFactory();
+        if (parentBeanFactory != null && !containsBeanDefinition(beanName)) {
+            // Not found -> check parent.
+            String nameToLookup = originalBeanName(name);
+            if (parentBeanFactory instanceof AbstractBeanFactory) {
+                return ((AbstractBeanFactory) parentBeanFactory).doGetBean(
+                    nameToLookup, requiredType, args, typeCheckOnly);
+            }
+            else if (args != null) {
+                // Delegation to parent with explicit args.
+                return (T) parentBeanFactory.getBean(nameToLookup, args);
+            }
+            else if (requiredType != null) {
+                // No args -> delegate to standard getBean method.
+                return parentBeanFactory.getBean(nameToLookup, requiredType);
+            }
+            else {
+                return (T) parentBeanFactory.getBean(nameToLookup);
+            }
+        }
+
+        if (!typeCheckOnly) {
+            markBeanAsCreated(beanName);
+        }
+
+        StartupStep beanCreation = this.applicationStartup.start("spring.beans.instantiate")
+            .tag("beanName", name);
+        try {
+            if (requiredType != null) {
+                beanCreation.tag("beanType", requiredType::toString);
+            }
+            RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);
+            checkMergedBeanDefinition(mbd, beanName, args);
+
+            // Guarantee initialization of beans that the current bean depends on.
+            String[] dependsOn = mbd.getDependsOn();
+            if (dependsOn != null) {
+                for (String dep : dependsOn) {
+                    if (isDependent(beanName, dep)) {
+                        throw new BeanCreationException(mbd.getResourceDescription(), beanName,
+                                                        "Circular depends-on relationship between '" + beanName + "' and '" + dep + "'");
+                    }
+                    registerDependentBean(dep, beanName);
+                    try {
+                        getBean(dep);
+                    }
+                    catch (NoSuchBeanDefinitionException ex) {
+                        throw new BeanCreationException(mbd.getResourceDescription(), beanName,
+                                                        "'" + beanName + "' depends on missing bean '" + dep + "'", ex);
+                    }
+                }
+            }
+
+            // Create bean instance.
+            if (mbd.isSingleton()) {
+                sharedInstance = getSingleton(beanName, () -> {
+                    try {
+                        return createBean(beanName, mbd, args);
+                    }
+                    catch (BeansException ex) {
+                        // Explicitly remove instance from singleton cache: It might have been put there
+                        // eagerly by the creation process, to allow for circular reference resolution.
+                        // Also remove any beans that received a temporary reference to the bean.
+                        destroySingleton(beanName);
+                        throw ex;
+                    }
+                });
+                beanInstance = getObjectForBeanInstance(sharedInstance, name, beanName, mbd);
+            }
+
+            else if (mbd.isPrototype()) {
+                // It's a prototype -> create a new instance.
+                Object prototypeInstance = null;
+                try {
+                    beforePrototypeCreation(beanName);
+                    prototypeInstance = createBean(beanName, mbd, args);
+                }
+                finally {
+                    afterPrototypeCreation(beanName);
+                }
+                beanInstance = getObjectForBeanInstance(prototypeInstance, name, beanName, mbd);
+            }
+
+            else {
+                String scopeName = mbd.getScope();
+                if (!StringUtils.hasLength(scopeName)) {
+                    throw new IllegalStateException("No scope name defined for bean ´" + beanName + "'");
+                }
+                Scope scope = this.scopes.get(scopeName);
+                if (scope == null) {
+                    throw new IllegalStateException("No Scope registered for scope name '" + scopeName + "'");
+                }
+                try {
+                    Object scopedInstance = scope.get(beanName, () -> {
+                        beforePrototypeCreation(beanName);
+                        try {
+                            return createBean(beanName, mbd, args);
+                        }
+                        finally {
+                            afterPrototypeCreation(beanName);
+                        }
+                    });
+                    beanInstance = getObjectForBeanInstance(scopedInstance, name, beanName, mbd);
+                }
+                catch (IllegalStateException ex) {
+                    throw new ScopeNotActiveException(beanName, scopeName, ex);
+                }
+            }
+        }
+        catch (BeansException ex) {
+            beanCreation.tag("exception", ex.getClass().toString());
+            beanCreation.tag("message", String.valueOf(ex.getMessage()));
+            cleanupAfterBeanCreationFailure(beanName);
+            throw ex;
+        }
+        finally {
+            beanCreation.end();
+        }
+    }
+
+    return adaptBeanInstance(name, beanInstance, requiredType);
+}
+```
+
+
 
