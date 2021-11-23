@@ -2482,11 +2482,11 @@ public void preInstantiateSingletons() throws BeansException {
     List<String> beanNames = new ArrayList<>(this.beanDefinitionNames);
 
     for (String beanName : beanNames) {
-        // 获取合并bean定义——内部逻辑是如果没有合并bean定义，就从bean定义里面获取，再缓存进合并bean定义内
+        // 获取合并bean定义——内部逻辑是如果没有合并bean定义，就从bean定义里面获取，再缓存进合并bean定义内。如果bean定义里都没有直接抛出异常
         RootBeanDefinition bd = getMergedLocalBeanDefinition(beanName);
         // 只初始化具体、单例、非懒加载的bean
         if (!bd.isAbstract() && bd.isSingleton() && !bd.isLazyInit()) {
-            // 该bean是不是FactoryBean（在2.1 BeanDefinition和bean中提过，应该有影响吧）
+            // 该bean是不是FactoryBean（在2.1 BeanDefinition和bean中提过，应该有印象吧）
             if (isFactoryBean(beanName)) {
                 // factoryBean的beanName与它要创建的实例就差一个&，即FACTORY_BEAN_PREFIX
                 // 现在先初始化该factoryBean
@@ -2562,7 +2562,7 @@ protected <T> T doGetBean(
     String beanName = transformedBeanName(name);
     Object beanInstance;
 	
-    // 是否已经被创建过了，如果已经创建过了，就直接返回创建过的bean
+    // 是否是手动注册的bean，如果是，就直接返回这个手动注册的实例（如果注册的是FactoryBean则调用它的getObject方法）
     Object sharedInstance = getSingleton(beanName);
     if (sharedInstance != null && args == null) {
         if (logger.isTraceEnabled()) {
@@ -2574,39 +2574,34 @@ protected <T> T doGetBean(
                 logger.trace("Returning cached instance of singleton bean '" + beanName + "'");
             }
         }
-        // 
+        // 主要是对factoryBean做了处理
         beanInstance = getObjectForBeanInstance(sharedInstance, name, beanName, null);
     }
 
     else {
-        // Fail if we're already creating this bean instance:
-        // We're assumably within a circular reference.
+        // 对多例，如果正在创建该实例，我们认为是在循环引用中，抛出异常
         if (isPrototypeCurrentlyInCreation(beanName)) {
             throw new BeanCurrentlyInCreationException(beanName);
         }
-
-        // Check if bean definition exists in this factory.
         BeanFactory parentBeanFactory = getParentBeanFactory();
+        // 如果本beanFactory没有该bean，又有父beanFactory的话，交由父beanFactory寻找
         if (parentBeanFactory != null && !containsBeanDefinition(beanName)) {
-            // Not found -> check parent.
             String nameToLookup = originalBeanName(name);
             if (parentBeanFactory instanceof AbstractBeanFactory) {
                 return ((AbstractBeanFactory) parentBeanFactory).doGetBean(
                     nameToLookup, requiredType, args, typeCheckOnly);
             }
             else if (args != null) {
-                // Delegation to parent with explicit args.
                 return (T) parentBeanFactory.getBean(nameToLookup, args);
             }
             else if (requiredType != null) {
-                // No args -> delegate to standard getBean method.
                 return parentBeanFactory.getBean(nameToLookup, requiredType);
             }
             else {
                 return (T) parentBeanFactory.getBean(nameToLookup);
             }
         }
-
+		// 第四个参数：是不是只用于类型检查，而不是真的创建来用
         if (!typeCheckOnly) {
             markBeanAsCreated(beanName);
         }
@@ -2617,17 +2612,20 @@ protected <T> T doGetBean(
             if (requiredType != null) {
                 beanCreation.tag("beanType", requiredType::toString);
             }
+            // 获取合并bean定义，并且校验该定义，此处默认只校验这个要被创建的实例对应的类是不是抽象的，如果是抛出异常
             RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);
             checkMergedBeanDefinition(mbd, beanName, args);
 
-            // Guarantee initialization of beans that the current bean depends on.
+            // 保证该bean所依赖的bean都被初始化了
             String[] dependsOn = mbd.getDependsOn();
             if (dependsOn != null) {
                 for (String dep : dependsOn) {
+                    // 看dep是否依赖于beanName对应的bean，如果是抛出循环引用异常 ？？？不知道对不对
                     if (isDependent(beanName, dep)) {
                         throw new BeanCreationException(mbd.getResourceDescription(), beanName,
-                                                        "Circular depends-on relationship between '" + beanName + "' and '" + dep + "'");
+						"Circular depends-on relationship between '" + beanName + "' and '" + dep + "'");
                     }
+                    // 将依赖关系存下来=>存两个：1. dep被beanName依赖 2. beanName的所有依赖项里面添加dep？？？不知道对不对
                     registerDependentBean(dep, beanName);
                     try {
                         getBean(dep);
