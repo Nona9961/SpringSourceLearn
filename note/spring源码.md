@@ -378,7 +378,7 @@ this.beanFactory = new DefaultListableBeanFactory();	// 	构造方法中初始�
 
      1. 规范化beanName，这里涉及到`FactoryBean`（和`BeanFactory`不同，之后会谈）和别名问题，反正应该和容器无关
 
-     2. 看到`getSingleton(beanName);`但是注意上面的注释：`cache for manually registered singletons`，手动注册的单例，这应该不是我们要找的，继续往下看。
+     2. 看到`getSingleton(beanName);`但是注意上面的注释：`cache for manually registered singletons`，是缓存，这应该不是我们要找的，继续往下看。
 
      3. 跳过明显不是容器相关的方法，定位到
 
@@ -2562,7 +2562,9 @@ protected <T> T doGetBean(
     String beanName = transformedBeanName(name);
     Object beanInstance;
 	
-    // 是否是手动注册的bean，如果是，就直接返回这个手动注册的实例（如果注册的是FactoryBean则调用它的getObject方法）
+    // 缓存中查找bean
+    // 这里有三个map：singletonObjects、earlySingletonObjects、singletonFactories
+    // 暂时还不清楚怎么会有这么多map，但应该都是缓存，具体的我们之后遇到再看（和解循环引用有关）
     Object sharedInstance = getSingleton(beanName);
     if (sharedInstance != null && args == null) {
         if (logger.isTraceEnabled()) {
@@ -2574,7 +2576,8 @@ protected <T> T doGetBean(
                 logger.trace("Returning cached instance of singleton bean '" + beanName + "'");
             }
         }
-        // 主要是对factoryBean做了处理
+        // 主要是对factoryBean做了处理，如果bean是一般bean或者beanName明确指定要FactoryBean（带有前缀&）——>直接返回该bean
+        // 如果beanName是一般bean而sharedInstance是BeanFacotry，返回这个工厂创建的实例
         beanInstance = getObjectForBeanInstance(sharedInstance, name, beanName, null);
     }
 
@@ -2620,14 +2623,16 @@ protected <T> T doGetBean(
             String[] dependsOn = mbd.getDependsOn();
             if (dependsOn != null) {
                 for (String dep : dependsOn) {
-                    // 看dep是否依赖于beanName对应的bean，如果是抛出循环引用异常 ？？？不知道对不对
+                    // 看dep是否依赖于beanName对应的bean，如果是抛出循环引用异常
+                    // isDependent方法是检测第一个参数是否是第二个参数的依赖，即第二个参数对应实例的创建需不需要第一个参数对应实例先创建
                     if (isDependent(beanName, dep)) {
                         throw new BeanCreationException(mbd.getResourceDescription(), beanName,
 						"Circular depends-on relationship between '" + beanName + "' and '" + dep + "'");
                     }
-                    // 将依赖关系存下来=>存两个：1. dep被beanName依赖 2. beanName的所有依赖项里面添加dep？？？不知道对不对
+                    // 将依赖关系存下来=>存两个：1. dep被beanName依赖 2. beanName的所有依赖项里面添加dep
                     registerDependentBean(dep, beanName);
                     try {
+                        // 初始化依赖项dep
                         getBean(dep);
                     }
                     catch (NoSuchBeanDefinitionException ex) {
@@ -2637,16 +2642,19 @@ protected <T> T doGetBean(
                 }
             }
 
-            // Create bean instance.
+            // 创建单例实例
             if (mbd.isSingleton()) {
+                // getSingleton第二个参数是ObjectFactory，也就是我们之前提过的像Supplier的接口，它的实现就是这个λ表达式
+                // 这个getSingleton和之前的getSingleton方法区别在于（重载）这个方法除了获得实例，如果没有缓存还会
+                // 添加到缓存中（singletonObjects这个map）
                 sharedInstance = getSingleton(beanName, () -> {
                     try {
+                        // 创建bean实例，下面着重分析这个方法
                         return createBean(beanName, mbd, args);
                     }
                     catch (BeansException ex) {
-                        // Explicitly remove instance from singleton cache: It might have been put there
-                        // eagerly by the creation process, to allow for circular reference resolution.
-                        // Also remove any beans that received a temporary reference to the bean.
+                        // 如果创建过程抛出异常，立刻删除缓存和其他依赖了该bean的所有bean。
+                        // 这里提到了创建过程中会将实例放在缓存中，以解循环引用
                         destroySingleton(beanName);
                         throw ex;
                     }
