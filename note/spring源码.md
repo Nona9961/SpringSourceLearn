@@ -475,7 +475,11 @@ this.beanFactory = new DefaultListableBeanFactory();	// 	构造方法中初始�
 
    - lazyInit：懒加载
 
-   - dependsOn：依赖类，这些类要先于该类初始化
+   - dependsOn：依赖类，这些类必须要先于该类**初始化**，强度高于引用。可以使用`@dependsOn`注解（xml的bean标签也有相应属性）
+
+     - 如果类A**引用了**类B，注入的时候如果B还没有被完全初始化也是可以被注入到A中的，甚至可以是`null`
+     - 如果类A**依赖于**类B，创建A的时候如果B还没有被初始化，那就先进行B的**完全**初始化。此外，A依赖于B是可以不引用B的（虽然不知道有什么用）。
+     - 优点在于定义了bean之间初始化的顺序和销毁bean的销毁顺序，但同时失去了解**循环引用**的能力——即是说如果A、B相互**依赖**，一定会抛出异常
 
    - autowireCandidate：是否在按类型注入时忽略这个bean
 
@@ -2432,6 +2436,8 @@ registerListeners();
 
 看到这个标题我想很多人应该会比较开心，因为这意味着我们终于到了核心的初始化过程了，这也是我们探索`refresh`方法的初衷（主线）……就是不知道大家还记得到吗？
 
+和上次再看BeanFactory那一节一样，本节的内容比较多，多是源码，大家慢慢看
+
 ```java
 // ...
 // 实例化所有剩下的（非懒加载）的单例
@@ -2548,6 +2554,8 @@ public void preInstantiateSingletons() throws BeansException {
 
 那么，我们就看看核心方法吧：
 
+**这里需要注意，循环引用和循环依赖是不同的事情，详见[ 2.1 BeanDefinition和bean](# 2.1 BeanDefinition和bean)中关于DependsOn的描述**
+
 ```java
 public Object getBean(String name) throws BeansException {
     return doGetBean(name, null, null, false);
@@ -2623,7 +2631,7 @@ protected <T> T doGetBean(
             String[] dependsOn = mbd.getDependsOn();
             if (dependsOn != null) {
                 for (String dep : dependsOn) {
-                    // 看dep是否依赖于beanName对应的bean，如果是抛出循环引用异常
+                    // 看dep是否依赖于beanName对应的bean，如果是抛出循环依赖异常
                     // isDependent方法是检测第一个参数是否是第二个参数的依赖，即第二个参数对应实例的创建需不需要第一个参数对应实例先创建
                     if (isDependent(beanName, dep)) {
                         throw new BeanCreationException(mbd.getResourceDescription(), beanName,
@@ -2661,9 +2669,8 @@ protected <T> T doGetBean(
                 });
                 beanInstance = getObjectForBeanInstance(sharedInstance, name, beanName, mbd);
             }
-
+			// 多例的话，直接创建实例返回
             else if (mbd.isPrototype()) {
-                // It's a prototype -> create a new instance.
                 Object prototypeInstance = null;
                 try {
                     beforePrototypeCreation(beanName);
@@ -2674,17 +2681,19 @@ protected <T> T doGetBean(
                 }
                 beanInstance = getObjectForBeanInstance(prototypeInstance, name, beanName, mbd);
             }
-
+				// 处理单例和多例以外的scope
             else {
                 String scopeName = mbd.getScope();
                 if (!StringUtils.hasLength(scopeName)) {
                     throw new IllegalStateException("No scope name defined for bean ´" + beanName + "'");
                 }
+                // 获取对应的scope（scope在之前提过）
                 Scope scope = this.scopes.get(scopeName);
                 if (scope == null) {
                     throw new IllegalStateException("No Scope registered for scope name '" + scopeName + "'");
                 }
                 try {
+                    // scope的get方法第二个参数也是ObjectFactory
                     Object scopedInstance = scope.get(beanName, () -> {
                         beforePrototypeCreation(beanName);
                         try {
@@ -2704,6 +2713,7 @@ protected <T> T doGetBean(
         catch (BeansException ex) {
             beanCreation.tag("exception", ex.getClass().toString());
             beanCreation.tag("message", String.valueOf(ex.getMessage()));
+            // 把该bean从alreadyCreated集合里面移除
             cleanupAfterBeanCreationFailure(beanName);
             throw ex;
         }
@@ -2711,10 +2721,40 @@ protected <T> T doGetBean(
             beanCreation.end();
         }
     }
-
+	// 如果创建的实例和requiredType不同（我们这里传的requiredType是null，所以直接返回了），尝试转换bean的type
     return adaptBeanInstance(name, beanInstance, requiredType);
 }
 ```
 
+简单整理一下（抛掉所有log、异常处理和一些细节处理）
 
+- `preInstantiateSingletons`：循环创建一个个的bean
+
+  ```mermaid
+  graph LR
+  a[根据beanName<br/>获取合并bean定义] --> b[确认该bean不是抽象,<br/>不是多例,不是懒加载] --> sw{是否是FactoryBean}
+  sw --不是--> 直接获取该bean
+  sw --是--> c[在beanName之前拼上&<br/>直接获取该factoryBean] --> sw2{查看是否此时直接实例化<br/>该factoryBean对应的实例}
+  sw2 --是--> d[用不拼上&的<br/>beanName获取<br/>工厂的创建的实例] -->e
+  sw2 --不是--> e
+  e[调用回调]
+  ```
+  
+- `doGetBean`：获取bean实例
+
+  ```mermaid
+  graph LR
+  a{"检查缓存<br/>getSingleton<br/>(beanName)"}--有-->b[直接返回实例] 
+  a--没有--> c{当前beanFactory中<br/>是否包含beanName<br/>的bean定义}
+  c--没有--> d[向父beanFactory<br/>中寻找对应的bean]
+  c--有--> 获取合并bean定义-->e{检查依赖} --有依赖--> f[初始化依赖项] -->g
+  e--没有依赖--> g[根据scope创建实例] -->h[如果有明确requiredType<br/>将实例转换为该类]
+  
+  ```
+
+  - 此处有个经常调用的方法`getObjectForBeanInstance`，关于该方法的作用在第一次出现的地方用注释做了解释，这里就不复制粘贴了
+
+至此，获得bean的过程我们清楚了，但是如何创建bean还不太清楚，所以我们得进入`createBean`方法里面一探究竟
+
+不过在此之前我们可以先简单猜测一下：
 
