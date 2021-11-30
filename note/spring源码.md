@@ -2653,8 +2653,8 @@ protected <T> T doGetBean(
             // 创建单例实例
             if (mbd.isSingleton()) {
                 // getSingleton第二个参数是ObjectFactory，也就是我们之前提过的像Supplier的接口，它的实现就是这个λ表达式
-                // 这个getSingleton和之前的getSingleton方法区别在于（重载）这个方法除了获得实例，如果没有缓存还会
-                // 添加到缓存中（singletonObjects这个map）
+                // 这个getSingleton和之前的getSingleton方法区别在于（重载）这个方法除了创建新实例，还会将该实例添加到缓存中的singletonObjects中，并且移除singletonFactories，earlySingletonObjects的缓存
+                // 这是解循环引用的一个重要步骤
                 sharedInstance = getSingleton(beanName, () -> {
                     try {
                         // 创建bean实例，下面着重分析这个方法
@@ -2888,8 +2888,12 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
         // 为该bean赋值（instanceWrapper持有bean实例不要忘了）大致有2种：
         // 1.InstantiationAwareBeanPostProcessor后置处理器处理注解
         // 2.按照name或者type注入相应的bean（自动装配才走这个）
-        // 不论哪种最终目的都是获得PropertyValues，进行
+        // 不论哪种最终目的都是获得PropertyValues，进行属性填充，执行applyPropertyValues方法
+        // 调用applyPropertyValues方法的过程中会创建不存在的引用实例resolveValueIfNecessary方法中resolveReference里出现了
+        // bean = this.beanFactory.getBean(resolvedName);方法，这是在创建当前对象的引用对象
+        // 同时注册当前对象依赖了创建对象this.beanFactory.registerDependentBean(resolvedName, this.beanName);
         populateBean(beanName, mbd, instanceWrapper);
+        // 该方法进行回调————Aware，init-method、bean后置处理器
         exposedObject = initializeBean(beanName, exposedObject, mbd);
     }
     catch (Throwable ex) {
@@ -2901,13 +2905,16 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
                 mbd.getResourceDescription(), beanName, "Initialization of bean failed", ex);
         }
     }
-
+	// 处理解循环引用，具体的放在下面说，这里简单写写干了些啥
     if (earlySingletonExposure) {
+        //从缓存的三个map里的singletonObjects、earlySingletonObjects拿（第二个参数为false表明不从singletonFactories拿）
         Object earlySingletonReference = getSingleton(beanName, false);
         if (earlySingletonReference != null) {
+            // 如果exposedObject（经过各种回调处理过的bean）和原始bean一样直接用earlySingletonReference
             if (exposedObject == bean) {
                 exposedObject = earlySingletonReference;
             }
+            // 如果不一样，且有其他bean已经持有早期引用的对象————这个行为是错误的，直接抛出异常，结束创建
             else if (!this.allowRawInjectionDespiteWrapping && hasDependentBean(beanName)) {
                 String[] dependentBeans = getDependentBeans(beanName);
                 Set<String> actualDependentBeans = new LinkedHashSet<>(dependentBeans.length);
@@ -2923,7 +2930,7 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
         }
     }
 
-    // Register bean as disposable.
+    // 注册销毁方法
     try {
         registerDisposableBeanIfNecessary(beanName, bean, mbd);
     }
@@ -2936,3 +2943,47 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
 }
 ```
 
+方法很长，本来现在应该进行`populateBean`方法的具体说明，但如果真这么做的话就太长了，**所以我决定将这一部分完全丢进details里面。**
+
+因为这一节地源码很多，且分散在各种地方，现在这里我们整理性地回答一些问题，以帮助我们理解创建过程到底做了什么事情：
+
+**1. spring中是如何解循环引用的**
+
+我们在整个初始化过程中已经不止一次看到这部分的代码注释了，现在我们来整理并分析一下：
+
+- 首先什么是循环引用：如果bean A引用了bean B，而且bean B引用了bean A，则我们称bean A和bean B是循环引用
+
+  - 上面的定义是2个bean之间的循环引用，多个bean之间的循环引用应该很好推广，这里只考虑2个bean
+
+- 循环引用会引发什么问题：在bean A创建的过程中，`populateBean`的时候发现需要bean B，于是去创建bean B，而在对bean B调用`populateBean`的时候，发现需要bean A，又回去创建bean A…………这不直接栈溢出或者堆溢出了
+
+- 循环引用的解决思路：我们都知道某个对象（以A为例）的创建其实分为两个部分：1.分配内存且初始化变量为默认值、2.执行`<init>()`方法（代码块、实例变量直接赋值、构造函数等）。因此，在创建的第一个部分就已经拥有了对象的引用（分配了内存）。而在上述循环引用中，只需要bean B发现需要bean A的时候**将之前创建出的bean A的引用**交予bean B即可，从而中断循环创建。
+
+- spring中的解决方式：采用三级缓存即：
+
+  ```java
+  	/** Cache of singleton objects: bean name to bean instance. */
+  	private final Map<String, Object> singletonObjects = new ConcurrentHashMap<>(256);	// 一级
+  
+  	/** Cache of early singleton objects: bean name to bean instance. */
+  	private final Map<String, Object> earlySingletonObjects = new ConcurrentHashMap<>(16); // 二级
+  
+  	/** Cache of singleton factories: bean name to ObjectFactory. */
+  	private final Map<String, ObjectFactory<?>> singletonFactories = new HashMap<>(16);// 三级
+  
+  ```
+
+  这三个map来解决
+
+  - 一级缓存专门用来缓存**完全创建好的bean**
+  - 二级缓存用来缓存**正在创建中，只有引用的bean**
+  - 三级缓存用来缓存**创建bean的`ObjectFactory`**
+
+- spring具体创建流程和缓存的关系：
+
+  1. `getSingleton`方法：他有3个重载方法，这里简单说一下
+     - `getSingleton(String beanName)`：调用`getSingleton(beanName, true)`
+     - `getSingleton(String beanName, boolean allowEarlyReference)`：根据beanName按顺序从一级缓存、二级缓存获取引用。如果`allowEarlyReference=true`且前2级没有获取到引用，那么串行的从一级、二级（并发可能现在就有了）、三级缓存中获取引用。如果在三级缓存中获得了`ObjectFactory`，调用它的`getObject`方法，**并将创建的实例放入二级缓存中**。
+       - `refresh()`中只有在`doCreateBean`方法中的`addSingletonFactory`方法里将`() -> getEarlyBeanReference(beanName, mbd, bean)`作为`ObjectFactory`的实现放入了三级缓存中。
+     - `getSingleton(String beanName, ObjectFactory<?> singletonFactory)`：这个方法只从一级缓存中获取引用，**如果没有该引用将通过`singletonFactory`创建一个新的实例，注册到一级缓存中（并且清除其他缓存）**
+     - 
