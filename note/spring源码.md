@@ -3185,9 +3185,87 @@ protected void finishRefresh() {
 
 将会陷入空虚地看代码中，所以依旧详略得当地来看这些代码——如果有没有提到的内容，希望大家自己会去细究。
 
-我们还是从扫描Bean开始：
+这一次我们从Spring中获取资源开始
 
-### 一、bean的扫描
+### 一、Resource
 
+记得在IOC章的时候，我们说过：
 
+> `Resource`：底层资源抽象出来的描述性接口，可以描述不论URL、FILE还是单纯的二进制流。但它终究是个句柄——即描述的底层资源可能并不存在。
 
+此外，我们还提到了`ResourceLoader`、`FileSystemResource`等
+
+现在我们就来详细了解一下吧（根据UML、注释这些话我依旧不会再写，各位看到一些定义性质的句子基本都是来自注释的）
+
+#### 1.1 InputStreamSource
+
+首先是`Resource`接口的父接口`InputStreamSource`。这是一个顶级接口，且它只有一个接口方法：
+
+```java
+InputStream getInputStream() throws IOException;
+```
+
+该接口是用于描述任一来自`InputStream`流的`Object`，而`getInputStream()`原则上希望每次调用返回的`InputStream`都是一个**新的实例**，这样就可以实现**重读**了。
+
+- 唯一例外的实现类是用于单次读取的`InputStreamResource`类
+
+而这么做的原因是因为Jdk的`InputStream`设计是不可重读的，而有些时候我们会面临就是要重新读一个流的情况，此时
+
+- 要么将读取的内容缓存下来，复用这些内容。
+- 要么根据原`InputStream`创建一个新的`InputStream`。
+
+spring选择了第二个方式（第一个方式有内存耗尽的风险）.
+
+此外，作为文件上传的常见接口`MultipartFile`也是该接口的子接口。
+
+#### 1.2 Resource
+
+`Resource`接口是计算机资源（file，url等）**描述**的一个抽象接口，继承自`InputStreamSource`表明，**可以将这些底层资源以`InputStream`流的形式加载进入内存**（且可以重复获取新的流）。
+
+这种统一资源的接口让我们可以很方便地对外部资源进行一个统一的访问。
+
+它所定义的方法有：
+
+```java
+// 用于表示该资源是否存在
+boolean exists(); 
+// 用于表示该资源是否可读，从spring5.1开始它和exists()具有相同的语义；但要注意返回true不一定真的可读；返回false一定不可读
+default boolean isReadable() { 
+    return exists();
+}
+// 表示该资源对应的Input流是否已经被打开，如果被打开了说明这个流不再能重读并且一定要读完并关闭以防止内存泄漏
+// 除了InputStreamResource,都应该是false
+default boolean isOpen() {
+    return false;
+}
+// 该资源是不是一个file
+default boolean isFile() {
+    return false;
+}
+// 获取该资源的url句柄，如果无法获得将抛出IOException
+URL getURL() throws IOException;
+// 获取该资源的uri句柄，如果无法获得将抛出IOException
+URI getURI() throws IOException;
+// 获取该资源对应的file句柄，如果无法获得将抛出IOException；此外如果无法解析为file的绝对路径将抛出FileNotFoundException
+File getFile() throws IOException;
+// 根据InputStream返回一个ReadableByteChannel
+default ReadableByteChannel readableChannel() throws IOException {
+    return Channels.newChannel(getInputStream());
+}
+// 返回该资源的大小
+long contentLength() throws IOException;
+// 返回该资源的最后修改时间
+long lastModified() throws IOException;
+// 根据当前resource的路径，传入相对路径得到另一个resource
+Resource createRelative(String relativePath) throws IOException;
+// 返回文件名，如果不是文件就返回null
+String getFilename();
+// 返回该资源的描述性字符串，一般用于异常和toString用。
+String getDescription();
+```
+
+可以看出来，一个`Resource`接口主要关注的是**读取**的内容，与写入没有任何相关。
+
+#### 1.3 Resource的几个子类
+
+##### 1.3.1 ContextResource
