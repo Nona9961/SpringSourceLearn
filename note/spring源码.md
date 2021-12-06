@@ -1845,7 +1845,7 @@ protected void prepareBeanFactory(ConfigurableListableBeanFactory beanFactory) {
 	// 注册bean后置处理器——将实现了ApplicationListener接口的bean注册为监听器
     beanFactory.addBeanPostProcessor(new ApplicationListenerDetector(this));
 
-    // 看是不是GraalVM虚拟机，如果是的话直接跳过代码编织能力
+    // 看是不是GraalVM，如果是的话直接跳过代码编织能力
     // 查看有没有AspectJ的代码编织能力，具体后续详谈
     if (!NativeDetector.inNativeImage() && beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {
         beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));
@@ -2429,6 +2429,8 @@ registerListeners();
    ```
    
    **然而没想到它最后还发布了早期事件——如果有需要的话，可以在refresh之前注册相应的早期事件和早期监听器，此时（初始化所有其他bean之前）会发布这些早期事件，可以处理一些内容。**
+   
+   **此外，注意到此时`this.earlyApplicationEvents`被置为null**
 
 到此为止，`refresh`中所有特殊debean都被实例完了——国际化、分发器、监听器主要就是这三种。接下来就是初始化其他所有的bean了。
 
@@ -2981,9 +2983,211 @@ protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable
 
 - spring具体创建流程和缓存的关系：
 
-  1. `getSingleton`方法：他有3个重载方法，这里简单说一下
+  - `getSingleton`方法：通篇看下来，创建bean的时候只有这个方法和缓存打了交道。他有3个重载方法，这里简单说一下
+
      - `getSingleton(String beanName)`：调用`getSingleton(beanName, true)`
+
      - `getSingleton(String beanName, boolean allowEarlyReference)`：根据beanName按顺序从一级缓存、二级缓存获取引用。如果`allowEarlyReference=true`且前2级没有获取到引用，那么串行的从一级、二级（并发可能现在就有了）、三级缓存中获取引用。如果在三级缓存中获得了`ObjectFactory`，调用它的`getObject`方法，**并将创建的实例放入二级缓存中**。
        - `refresh()`中只有在`doCreateBean`方法中的`addSingletonFactory`方法里将`() -> getEarlyBeanReference(beanName, mbd, bean)`作为`ObjectFactory`的实现放入了三级缓存中。
-     - `getSingleton(String beanName, ObjectFactory<?> singletonFactory)`：这个方法只从一级缓存中获取引用，**如果没有该引用将通过`singletonFactory`创建一个新的实例，注册到一级缓存中（并且清除其他缓存）**
-     - 
+       
+     - `getSingleton(String beanName, ObjectFactory<?> singletonFactory)`：这个方法只从一级缓存中获取引用，**如果没有该引用将通过第二个参数`singletonFactory`创建一个新的实例，注册到一级缓存中（并且清除其他缓存）**。
+
+       - `refresh()`中只有在`doGetBean`方法中创建单例的时候调用了这个方法，`ObjectFactory`参数的实现是
+
+         ```java
+         () -> {
+             try {
+                 return createBean(beanName, mbd, args);
+             }
+             catch (BeansException ex) {
+                 destroySingleton(beanName);
+                 throw ex;
+             }
+         }
+         ```
+
+         可见主要是调用了`createBean()`方法。
+       
+       - 注册进一级缓存的方法是`addSingleton`方法，只有在第一次创建实例的时候才会调用。
+
+- 现在可以来谈一下流程上如何实现的，这里以A,B相互引用为例，现在先进入创建bean A的方法
+
+  1. `doGetBean()`方法中先调用`getSingleton(String beanName)`方法在缓存中查询A，发现没有继续进行
+
+     ```java
+     // Eagerly check singleton cache for manually registered singletons.
+     Object sharedInstance = getSingleton(beanName);
+     ```
+
+  2. 创建A实例，调用`getSingleton(String beanName, ObjectFactory<?> singletonFactory)`方法，`singletonFactory`的实现是`createBean()`。
+
+  3. 第一次创建，调用`singletonObject = singletonFactory.getObject();`即`createBean()`，进入到`doCreateBean()`中
+
+     - 如果在`resolveBeforeInstantiation()`中生成了代理就不进`doCreateBean()`直接进入第10点的注释里
+
+  4. `doCreateBean`中调用`addSingletonFactory()`，**注册进入三级缓存**
+
+     ```java
+     addSingletonFactory(beanName, () -> getEarlyBeanReference(beanName, mbd, bean));
+     ```
+
+  5. `populateBean(beanName, mbd, instanceWrapper)`里发现需要B的引用，开始bean B的创建，调用`getBean(B)`
+
+  6. 从第1点开始，发现没有B的缓存，同样进入到第5点，发先需要A的引用，调用`getBean(A)`
+
+  7. 此时第1点的`getSingleton(beanName);`发现在三级缓存中存在A，并且此时调用`() -> getEarlyBeanReference(beanName, mbd, bean)`
+
+     ```java
+     protected Object getSingleton(String beanName, boolean allowEarlyReference) {
+         Object singletonObject = this.singletonObjects.get(beanName);
+         if (singletonObject == null && isSingletonCurrentlyInCreation(beanName)) {
+             singletonObject = this.earlySingletonObjects.get(beanName);
+             if (singletonObject == null && allowEarlyReference) {
+                 synchronized (this.singletonObjects) {
+                     singletonObject = this.singletonObjects.get(beanName);
+                     if (singletonObject == null) {
+                         singletonObject = this.earlySingletonObjects.get(beanName);
+                         if (singletonObject == null) {
+                             ObjectFactory<?> singletonFactory = this.singletonFactories.get(beanName);
+                             // 找到了A
+                             if (singletonFactory != null) {
+                                 // 该singletonFactory.getObject()就是getEarlyBeanReference(beanName, mbd, bean)
+                                 singletonObject = singletonFactory.getObject();
+                                 // 获取到了早期引用，注册进入二级缓存
+                                 this.earlySingletonObjects.put(beanName, singletonObject);
+                                 // 从三级缓存中删除
+                                 this.singletonFactories.remove(beanName);
+                             }
+                         }
+                     }
+                 }
+             }
+         }
+         return singletonObject;
+     }
+     ```
+
+  8. 获取到了A的引用，中断`getBean(A)`，完成`populateBean`方法，继续直到创建完毕B的实例
+
+  9. 回到B的`getSingleton(String beanName, ObjectFactory<?> singletonFactory)`中，继续调用`addSingleton(beanName, singletonObject)`方法，**将B从三级缓存注册进入一级缓存并删除三级缓存B的数据**。
+
+  10. 回到A的`populateBean`方法中，继续创建完毕A，同样执行第9点，将A**从二级缓存z注册进入一级缓存并删除二级缓存A的数据**。
+
+      - 如果是从`resolveBeforeInstantiation()`创建代理过来的话，就**直接注册进一级缓存**完事。
+
+- 为什么需要使用三级缓存
+
+  其实这个问题不难回答，首先一级缓存能不能解引用？我们注意到其实真正获取到引用的缓存**只有二级缓存**。所以毫不犹豫，完全可以只用一级缓存来解引用。所以，用三级缓存的原因自然就不只是解引用了，事实上：
+
+  - 一级缓存只存放创建好的实例，它就是一个缓存，避免二次创建相同的实例（单例）
+  - 二级缓存用于解引用
+  - 三级缓存重点在于`getEarlyBeanReference`方法中进行了`SmartInstantiationAwareBeanPostProcessor`中`getEarlyBeanReference`回调，可以向二级缓存里面放入代理——为了支持AOP
+
+**2.Spring中到底都有些啥特殊的bean后置处理器啊，怎么看起来这么多**
+
+其实如果注意到在`Refresh()`方法里面获取这些bean后置处理器的方法`getBeanPostProcessorCache()`，进去看看就清楚有**四种**很重要的bean后置处理器
+
+```java
+static class BeanPostProcessorCache {
+    // 创建bean之前和创建bean之后，还没填充属性的时候的两个回调，前者用于返回一个实例当作该bean（一般是代理），后者用于自己填充属性并考虑是否中断autowrie
+    final List<InstantiationAwareBeanPostProcessor> instantiationAware = new ArrayList<>();
+   
+    // 继承InstantiationAwareBeanPostProcessor，比较特殊的bean后置处理器，新声明了3个方法，都是在bean实例创建之前调用。从上往下：
+    // predictBeanType:告诉该父接口InstantiationAwareBeanPostProcessor中，返回的bean的class类型
+    // determineCandidateConstructors：创建bean时，告诉别人具体使用哪个构造器
+    // getEarlyBeanReference: 从三级缓存注册进二级缓存的时候提供机会可以获取一个代理
+    final List<SmartInstantiationAwareBeanPostProcessor> smartInstantiationAware = new ArrayList<>();
+    
+    // 销毁bean的时候调用
+    final List<DestructionAwareBeanPostProcessor> destructionAware = new ArrayList<>();
+    
+    // 初始化bean实例之前（已经有bean实例但还没填充属性）调用，在InstantiationAwareBeanPostProcessor的postProcessAfterInstantiation之前调用，主要处理bean定义
+    final List<MergedBeanDefinitionPostProcessor> mergedDefinition = new ArrayList<>();
+}
+```
+
+至此，我们就即将结束掉整个`refresh()`方法了
+
+#### 3.9 第七部分——结束refresh
+
+在初始化所有单例bean之后，我们再看看spring还干了什么事情：
+
+```java
+public void refresh() throws BeansException, IllegalStateException {
+    synchronized (this.startupShutdownMonitor) {
+        StartupStep contextRefresh = this.applicationStartup.start("spring.context.refresh");
+        // ....
+
+        // 最后一步：广播对应的event.
+        finishRefresh();
+        catch (BeansException ex) {
+            // ...
+        }
+        finally {
+            // 清除单例bean的元数据信息，之后应该不需要了
+            resetCommonCaches();
+            // refresh阶段结束
+            contextRefresh.end();
+        }
+    }
+}
+```
+
+这几个方法里面，最重要的就是`finishReFresh()`，我们点进去看看
+
+```java
+protected void finishRefresh() {
+    // 清除Context级别的缓存——如ASM读取的类元数据
+    clearResourceCaches();
+
+    // 初始化Context的生命周期进程bean————该bean用于向其他实现了Lifecycle接口的bean通知调用相应的生命周期方法
+    // 本质是特殊的观察者模式
+    initLifecycleProcessor();
+
+    // 要求所有生命周期bean调用start()方法
+    getLifecycleProcessor().onRefresh();
+
+    // 发布广播——在registerListener方法的最后，发布了早期事件，那时this.earlyApplicationEvents就被置为null了
+    // 除了发布本Context的事件，同时也会发布父Context的事件
+    publishEvent(new ContextRefreshedEvent(this));
+
+    // 没有了解过GraalVM，暂时不管
+    if (!NativeDetector.inNativeImage()) {
+        LiveBeansView.registerApplicationContext(this);
+    }
+}
+```
+
+可以看出来最后该方法其实就是做了**一个发布的动作**（`LifecycleProcessor`本质也是观察者模式），进行最后（完成所有bean初始化）的回调。
+
+至此，refresh()方法就介绍完了。虽然跳过了大部分内容导致还有很多问题没有解决，但从大局上来说，我们已经清楚spring一整个创建bean的流程了。
+
+在一次艰难的探寻中看完整个`refresh()`方法，犹记得最开始看的时候特别地困难，总觉得和之前bean定义->bean的过程有些出入，多了好多以前都没见过的内容。现在，经过了完整地探索之后终于可以简单总结回答一些问题了：
+
+1. `refresh()`到底刷新的是什么？
+   - 是`ApplicationContext`，具体来说是将`Context`刷新到刚好创建好所有bean，发布了所有事件的状态（注意，只是创建好了所有bean，bean的数量、是否创建与该状态无关）。
+2. 前面几个准备方法（try块之前）将context恢复至**相同的待刷新状态**到底是为什么？
+   - refresh()代码是写死的，也就是说刷新过程是定下来的，**只需要初始状态相同，经历相同的过程最后就能得到相同的状态**。
+3. 这个过程中出现了一些比较特殊的类，总结一下：
+   - `Aware`接口
+   - `Listener`、`Event`和`ApplicationEventMulticaster`
+   - `FactoryBean`和普通bean
+   - `BeanFactoryPostProcessor`和`BeanPostProcessor`
+   - `BeanPostProcessor`和其中四种特殊后置处理器
+   - `MessageSource`
+4. 创建bean的过程中都做了哪些事情：大致就是第六部分写的那些，但细节上比第六部分做了更多的事情（比如AOP，@Bean注解）这些问题在Detail里面
+
+接下来，就是我们去解决之前的**细节问题**的时候了。
+
+## Spring-Detail
+
+在之前的内容中，我们遇到了很多直接跳过的问题，这一章就是为了解决这些问题而存在的。虽然如此Spring的技术细节实在是太多，如果将其全部细细拆开来看
+
+将会陷入空虚地看代码中，所以依旧详略得当地来看这些代码——如果有没有提到的内容，希望大家自己会去细究。
+
+我们还是从扫描Bean开始：
+
+### 一、bean的扫描
+
+
+
