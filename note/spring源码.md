@@ -3264,8 +3264,107 @@ String getFilename();
 String getDescription();
 ```
 
-可以看出来，一个`Resource`接口主要关注的是**读取**的内容，与写入没有任何相关。
+可以看出来，一个`Resource`接口主要关注的是**读取**的内容，与写入没有任何关系。
 
 #### 1.3 Resource的几个子类
 
+在`Resource`接口下的实现类有一部分子类/接口，现在我们就来看看
+
 ##### 1.3.1 ContextResource
+
+一个简单的子接口，用于表明这个资源隶属于某个上下文（Context,比如web下的资源就是ServletContext里的）。它只添加了一个方法：
+
+```java
+String getPathWithinContext();
+```
+
+该方法用于返回描述**包含了上下文**的资源路径。
+
+##### 1.3.2 AbstractResource
+
+作为`Resource`接口的直接子抽象类，它没有认定该类表示的到底是File,Url还是什么（**事实上该资源假定什么都不是**），所以涉及到File或者Url这几个方法基本都是直接抛异常或者返回`null`。
+
+```java
+@Override
+public URL getURL() throws IOException {
+    throw new FileNotFoundException(getDescription() + " cannot be resolved to URL");
+}
+@Override
+public File getFile() throws IOException {
+    throw new FileNotFoundException(getDescription() + " cannot be resolved to absolute file path");
+}
+@Override
+public Resource createRelative(String relativePath) throws IOException {
+    throw new FileNotFoundException("Cannot create a relative resource for " + getDescription());
+}
+@Override
+@Nullable
+public String getFilename() {
+    return null;
+}
+```
+
+这里**不简单地**提一下**URL**和**URI**（这都是写在JavaDoc里的内容）
+
+- URI：`Uniform Resource Identifier`统一资源标识符，就是资源的唯一id，用于区分不同的资源。
+
+  - URI仅仅是用于区分资源，这意味着只通过URI通常无法知道这个资源到底在哪里。
+  - 一个URI的形式应为：
+
+  ` [scheme:]scheme-specific-part[#fragment]`
+
+  其中`[]`内的内容是可选的，如果一个uri是有`scheme`的，称其为**绝对的**；相反，称其为**相对的**。
+
+  - 对于一个URI，它也可以细分为两类：
+
+    - 如果是一个**绝对URI**且其`scheme-specific-part`部分**没有以**`/`开头，这些URI无法被进一步解析，称为不透明的URI
+      - 比如:`news:comp.lang.java`，`urn:isbn:096139210x`
+    - 如果是一个绝对URI且其`scheme-specific-part`部分**以**`/`开头，或者是一个**相对URI**，那么这些URI可以被进一步解析，称为有层次的URI
+      - 比如:`http://java.sun.com/j2se/1.3/}`，`file:///~/calendar`,`../../../demo/jfc/SwingSet2/src/SwingSet2.java`
+
+  - 对于一个**有层次的URI**，它可以被解析为（不知道为啥path也是可选的，这不可以直接为空）
+
+    ` [scheme:][//authority][path][?query][#fragment]`
+
+    其中
+
+    - `authority`具体为`[userinfo@]host[:port]`，userinfo不常见，但遇到了也要知道，它的一般形式为username:password,但也不固定
+      - 这个形式只对基于服务的uri有效，对基于注册的uri无法这么解析，但现在基本已经不用基于注册的形式了
+    - `path`就是由`/`片段组成的路径，如果path以`/`开头称路径为**绝对路径**；反之，称其为**相对路径**。
+      - 绝对URI和带有`authority`的URI都一定是绝对的。
+    - query和fragment都不太重要，可以忽略
+
+- URL：`Uniform Resource Location`
+
+  - 
+
+
+其他实现方法大家可以自己看一下，我们直接进入下一个子类。
+
+##### 1.3.3 AbstractFileResolvingResource
+
+该类继承了`AbstractResource`，代表了那些解析出来指向的是file的url资源。
+
+支持开头为`file:`和Jboss的`vfs`协议
+
+重写了与File相关的方法：基本都是根据`getURL()`拿到Url，再根据url去new一个`File`。
+
+- `File`是jdk中描述资源的句柄，所以这只是把`Resource`具体到`File`了而已
+
+但是注意，对于`getUrl()`并没有重写，这意味着url的获取交由子类来实现。
+
+##### 1.3.4 UrlResource
+
+作为`AbstractFileResolvingResource`的实现类，也是我们至今看到的第一个普通类
+
+毫无疑问，`UrlResource`要做的事情就是重写`getURL()`方法。事实上该类就直接持有一个`URL`的引用——`private final URL url`，也是各种构造函数里面都要赋值的属性，那`getURL()`直接返回这个属性就行了，`UrlResource`也是这么做的：
+
+```java
+@Override
+public URL getURL() {
+    return this.url;
+}
+```
+
+
+

@@ -7,7 +7,7 @@ import org.springframework.context.NoSuchMessageException;
 import java.util.Locale;
 
 /**
- * @author hu mingcheng
+ * @author nona9961
  * @date 2021/11/17 18:15
  */
 public class MyMessageSource implements MessageSource {
