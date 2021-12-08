@@ -3334,9 +3334,8 @@ public String getFilename() {
       - 绝对URI和带有`authority`的URI都一定是绝对的。
     - query和fragment都不太重要，可以忽略
 
-- URL：`Uniform Resource Location`
+- URL：`Uniform Resource Location`统一资源定位符，是URI的子集——它不仅可以标识资源，还可以定位资源从而获取到资源
 
-  - 
 
 
 其他实现方法大家可以自己看一下，我们直接进入下一个子类。
@@ -3349,7 +3348,7 @@ public String getFilename() {
 
 重写了与File相关的方法：基本都是根据`getURL()`拿到Url，再根据url去new一个`File`。
 
-- `File`是jdk中描述资源的句柄，所以这只是把`Resource`具体到`File`了而已
+- `File`是**jdk**中描述**资源的句柄**，所以这只是把`Resource`具体到`File`了而已
 
 但是注意，对于`getUrl()`并没有重写，这意味着url的获取交由子类来实现。
 
@@ -3366,5 +3365,88 @@ public URL getURL() {
 }
 ```
 
+一个用URL获取资源的没啥用的例子：
 
+```java
+void test() throws IOException {
+    // file
+    URL url = new URL("file:/C:/Users/Administrator/Desktop/20210928-000010.png");
+    UrlResource urlResource = new UrlResource(url);
+    File file = urlResource.getFile();
+    InputStream inputStream = urlResource.getInputStream();
+    inputStream.close();
+    // web
+    UrlResource anotherResource = new UrlResource("http://www.baidu.com");
+    // File notExistFile = anotherResource.getFile();  ------> FileNotFoundException 毕竟url指向的file根本不在我们的系统里
+    InputStream webIS = anotherResource.getInputStream();
+    webIS.close();
+}
+```
+
+##### 1.3.5 ClassPathResource
+
+作为`AbstractFileResolvingResource`的另一个实现类，`ClassPathResource`通过`ClassLoader`或者给定的`class`来加载资源的。
+
+- 通过给定的class最后也是用class的`ClassLoader`来加载资源的
+
+它的构造方法支持传入`classLoader`来使用该`classLoader`来加载资源，但一般的我们不会去传这么一个参数，而直接使用最简单的单参数构造方法
+
+```java
+public ClassPathResource(String path) {
+    this(path, (ClassLoader) null);
+}
+// 单参调用的构造方法
+public ClassPathResource(String path, @Nullable ClassLoader classLoader) {
+    Assert.notNull(path, "Path must not be null");
+    String pathToUse = StringUtils.cleanPath(path);
+    if (pathToUse.startsWith("/")) {
+        pathToUse = pathToUse.substring(1);
+    }
+    this.path = pathToUse;
+    this.classLoader = (classLoader != null ? classLoader : ClassUtils.getDefaultClassLoader());
+}
+```
+
+注意到使用path当参数，最后classLoader是当前线程上下文的类加载器——一般来说就是**系统类加载器**(`Application Class Loader`)，**用于加载classPath下**的文件，这部分不清楚的朋友可以去了解一下三层类加载器和双亲委派。（当然java9之后的模块化也可以去了解一下）
+
+所以**传入的参数path一定是相对于classPath的相对路径**（即使再最前面加上"/"也会被剔除），不然会抛出找不到文件异常（FileNotFoundException）。
+
+```java
+// 偷个小懒
+public class ClassPathResourceTest {
+    public static void main(String[] args) throws IOException {
+        ClassPathResource classPathResource = new 				ClassPathResource("com/nona9961/springsourcecode/withSpringboot/entity/BeanWithId.class");
+        InputStream inputStream = classPathResource.getInputStream();
+        int available = inputStream.available();
+        byte[] bytes = new byte[available];
+        inputStream.read(bytes);
+        System.out.println(new String(bytes));
+        inputStream.close();
+    }
+}
+```
+
+- 当然如果使用自己的`ClassLoader`或者`class`情况另说
+
+##### 1.3.6 FileSystemResource
+
+`FileSystemResource`是`AbstractResource`的子类，同时实现了`WritableResource`接口。（该类不是`AbstractFileResolvingResource`的子类）
+
+再说这个类之前先简单提一下接口`WritableResource`
+
+`WritableResource`是`Resource`的直接子接口，我们之前提过：
+
+> 可以看出来，一个`Resource`接口主要关注的是**读取**的内容，与写入没有任何关系。
+
+现在，这个接口就是将**写入**功能给加上的：`OutputStream getOutputStream() throws IOException;`
+
+看回`FileSystemResource`，该类仅描述**存在于系统上的文件**（FileSystem）。
+
+比起`ClassPathResource`不需要限定在classPath上。
+
+- 构造函数中的path是用来创建`File`的，所以path的绝对、相对性都和`File`一样
+
+#### 1.4 ResourceLoader
+
+介绍完几个`Resource`的子类后，现在我们来谈一下以前出现过的`ResourceLoader`。
 
