@@ -3587,7 +3587,7 @@ Resource[] getResources(String locationPattern) throws IOException;
 
    **注意：**pattern和path一定同时为**绝对**或者**相对**的，这样才能够正确匹配。如此强烈建议都使用**绝对路径**！
 
-   - [ ] 看一下这个算法
+   - [ ] todo看一下这个算法
 
    关于该类的match方法，这里就不去细究了，有兴趣的朋友们可以去看看大佬是如何实现的。
 
@@ -3597,10 +3597,10 @@ Resource[] getResources(String locationPattern) throws IOException;
 
    这个方法较长，有兴趣的可以看看
 
-   - [ ] 看一下这个方法
+   - [ ] todo看一下这个方法
 
 至此，`ResourceLoader`我们就介绍完了。
 
 #### 1.6 总结
 
-### 二、
+### 二、BeanPostProcessor
