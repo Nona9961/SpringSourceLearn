@@ -3432,7 +3432,7 @@ public class ClassPathResourceTest {
 
 `FileSystemResource`是`AbstractResource`的子类，同时实现了`WritableResource`接口。（该类不是`AbstractFileResolvingResource`的子类）
 
-再说这个类之前先简单提一下接口`WritableResource`
+说这个类之前先简单提一下接口`WritableResource`
 
 `WritableResource`是`Resource`的直接子接口，我们之前提过：
 
@@ -3442,7 +3442,7 @@ public class ClassPathResourceTest {
 
 看回`FileSystemResource`，该类仅描述**存在于系统上的文件**（FileSystem）。
 
-比起`ClassPathResource`不需要限定在classPath上。
+比起`ClassPathResource`不需要限定在classPath上，比起`UrlResource`仅允许是在本系统中的文件，而且前二者都没有写入功能。
 
 - 构造函数中的path是用来创建`File`的，所以path的绝对、相对性都和`File`一样
 
@@ -3450,3 +3450,157 @@ public class ClassPathResourceTest {
 
 介绍完几个`Resource`的子类后，现在我们来谈一下以前出现过的`ResourceLoader`。
 
+第一次出现是在介绍中心接口`ApplicationContext`上，所有的Context都实现了该接口（一般是以委托形式进行的）。
+
+该接口是一个用于加载资源的策略接口，根据不同的参数执行不同的算法以获得不同的`Resource`。核心方法是：
+
+```java
+Resource getResource(String location);
+```
+
+这个方法支持的`location`**必须**有：
+
+- 完整的`URL`格式：`"file:C:/test.dat"`————> 转为`UrlResource`
+- classPath协议的伪`URL`：`"classpath:test.dat"`————>转为`ClassPathResource`
+
+**可选**的支持：
+
+- 相对路径：`"WEB-INF/test.dat"`————>由子类自由实现（一般是`ApplicationContext`的子类来实现）
+
+#### 1.5 ResourceLoader的实现
+
+##### 1.5.1 DefaultResourceLoader
+
+类`DefaultResourceLoader`是`ResourceLoader`的**默认实现类**，可以在`ApplicationContext`中使用（比如`AbstractApplicationContext`），也可以拿出来单独使用。
+
+这里就简单分析一下：
+
+1. 构造方法提供了传入`ClassLoader`的功能，如果要创建`ClassPathResource`就用传进来的`ClassLoader`不然就是之前提到过的线程上下文的类加载器
+
+2. `ProtocolResolver`是作为`DefaultResourceLoader`一个**SPI的函数式接口**。用户可以自己定义一种协议，并根据该协议实现`ProtocolResolver`接口
+
+   重写`Resource resolve(String location, ResourceLoader resourceLoader);`方法，并将该接口的实现类实例通过`DefaultResourceLoader#addProtocolResolver(ProtocolResolver)`加入到`DefaultResourceLoader`中。通过`DefaultResourceLoader`获取资源时，当location是符合自定义的协议时，就将其按照用户写的算法解析为对应的resource。这个方法要搭配`DefaultResourceLoader#getResource(String)`一起看。
+
+3. 定义了一个嵌套类`ClassPathContextResource`，它继承了`ClassPathResource`，在此之上实现了`ContextResource`。**但并没有多做什么**，只是**强调**了是相对于classPath的`ClassPathResource`（其实和`ClassPathResource`没啥大不同，只是只在Spring内部使用而已）。
+
+4. 添加了`protected Resource getResourceByPath(String path)`方法，默认根据path返回对应的`ClassPathContextResource`。**可以被重写**。
+
+   - 因为`ClassPathContextResource`本质和`ClassPathResource`没有不同，都是classPath下的资源。但如果我想要`ServletContext`下的资源呢？那就只有继承`DefaultResourceLoader`重写该方法来返回`ServletContext`下的资源，正如`ServletContextResourceLoader`所作的一样。
+   - **所以该方法是用来返回在某个Context下资源的方法**
+
+5. 核心方法`getResource`的实现：
+
+   ```java
+   public Resource getResource(String location) {
+       Assert.notNull(location, "Location must not be null");
+   	// 先用用户自定义的ProtocolResolver尝试解析该location
+       for (ProtocolResolver protocolResolver : getProtocolResolvers()) {
+           Resource resource = protocolResolver.resolve(location, this);
+           if (resource != null) {
+               return resource;
+           }
+       }
+   	// 绝对路径——去掉"/"应该就是相对context的路径，所以调用getResourceByPath方法
+       if (location.startsWith("/")) {
+           return getResourceByPath(location);
+       }
+       // 以classpath:开头的伪url，其实是类路径上的资源，都是类路径上的资源了肯定不在任何其他context之下，直接返回ClassPathResource
+       else if (location.startsWith(CLASSPATH_URL_PREFIX)) {
+           return new ClassPathResource(location.substring(CLASSPATH_URL_PREFIX.length()), getClassLoader());
+       }
+       else {
+           try {
+               // 假设可以将location转为URL，返回UrlResource
+               URL url = new URL(location);
+               return (ResourceUtils.isFileURL(url) ? new FileUrlResource(url) : new UrlResource(url));
+           }
+           catch (MalformedURLException ex) {
+               // 不是URL，最后尝试直接把location当作path，调用getResourceByPath
+               return getResourceByPath(location);
+           }
+       }
+   }
+   ```
+
+可以发现，其实默认实现还是蛮简单的。
+
+既然有这么一个好用的的策略类，**以后就少直接new对应的`Resource`了**，用这个类就好了（也是`ResourceLoader`接口的初衷）
+
+- 对于其他的`Resource`实现类，可以通过添加`ProtocolResolver`自定义解析，而对于常见的其他`Resource`，`DefaultResourceLoader`也有几个子类可以去看看。
+
+虽然现在获取一个资源已经变得很简单了，但对于Spring一次性读取classpath下多个`.class`文件，还不太够用，所以接下来我们要介绍另一个`ResourceLoader`接口的子接口`ResourcePatternResolver`
+
+##### 1.5.2 ResourcePatternResolver
+
+接口`ResourcePatternResolver`是`ResourceLoader`的直接子接口，它提供了一个新的方法：
+
+```java
+Resource[] getResources(String locationPattern) throws IOException;
+```
+
+用于解析匹配`location pattern(位置模式)`的path(`URL`)为一系列`Resource`。该接口只提供这个转换方法，而不指定**某种匹配规则**，具体的留给子类去实现——这也是一个策略接口。至于这个匹配规则，官方默认给出了
+
+- `classpath*:`指定classPath路径下所有文件，比如位置模式`classpath*:/beans.xml`，将会匹配classpath下所有的`beans.xml`文件**的路径**。
+- `ant style regular expressions`：ant风格的匹配模式
+
+下面我们就来看它的默认实现类。
+
+##### 1.5.3 PathMatchingResourcePatternResolver
+
+`PathMatchingResourcePatternResolver`看构造方法要求持有一个`ResourceLoader`的引用：不传就默认new一个`DefaultResourceLoader`；传了就使用传进来的那个。
+
+注意到这是**装饰器模式**的应用，那么`DefaultResourceLoader`可以完成的事情就都委托给`DefaultResourceLoader`完成，**我们只需要关注新的内容**。
+
+1. 添加了一个属性：`private PathMatcher pathMatcher = new AntPathMatcher();`默认使用`AntPathMatcher`，也可以用相应的`setter`注入自定义的`PathMatcher`
+
+   这里我们简单说一下`PathMatcher`这个接口，顾名思义这应该就是来匹配规则的接口。事实上它的方法：
+
+   ```java
+   // 传进来的path能不能被该实现类完成匹配操作————一般是看这个path里面有没有像*?{这样的特殊字符
+   boolean isPattern(String path);
+   // 判断pattern和path是否匹配
+   boolean match(String pattern, String path);
+   // 判断path是否和pattern部分匹配
+   boolean matchStart(String pattern, String path);
+   // 将path里匹配pattern的部分提取出来，至于这部分有多大取决于子类实现
+   String extractPathWithinPattern(String pattern, String path);
+   // 在匹配的URI里提取pattern里用{}包裹起来的模板变量——"/a/{lala}"模式匹配"/a/haha"将会获得一个map的entry: lala->haha。
+   Map<String, String> extractUriTemplateVariables(String pattern, String path);
+   // 根据path返回一个根据精准程度排序的比较器
+   Comparator<String> getPatternComparator(String path);
+   // 组合两个pattern，具体如何组合由子类自由实现
+   String combine(String pattern1, String pattern2);
+   ```
+
+   其中，最重要的方法就是`match()`，现在我们就来看看这个接口的默认实现（也是唯一实现）`AntPathMatcher`。
+
+   该实现类使用ant风格的匹配模式：
+
+   | 通配符       | 匹配范围               | 示例                       | 匹配                                 |
+   | ------------ | ---------------------- | -------------------------- | ------------------------------------ |
+   | *            | 匹配任意数量的字符     | /*.jpg                     | /one.jpg                             |
+   | **           | 匹配任意层级的路径     | http://host:port/public/** | http://host:port/public/getIndex     |
+   | ?            | 匹配单个字符           | video/2021-12-2?/\**.\*    | video/2021-12-25/nona/short/play.mp4 |
+   | {var:[a-z]+} | 以正则表达式的方式匹配 | com/{filename:\\w+}.jsp    | com/test.jsp且将test赋值于filename   |
+
+   上面正则表达式一行，将表达式去掉就是我们熟悉的`PathVariable`
+
+   **注意：**pattern和path一定同时为**绝对**或者**相对**的，这样才能够正确匹配。如此强烈建议都使用**绝对路径**！
+
+   - [ ] 看一下这个算法
+
+   关于该类的match方法，这里就不去细究了，有兴趣的朋友们可以去看看大佬是如何实现的。
+
+   此外，Spring5之后Spring推出了`PathPattern`（在`org.springframework.web.util.pattern`包中，`PathMatcher`在`core`包下）来代替网络URL匹配。
+
+2. 实现了方法`Resource[] getResources(String locationPattern) throws IOException;`
+
+   这个方法较长，有兴趣的可以看看
+
+   - [ ] 看一下这个方法
+
+至此，`ResourceLoader`我们就介绍完了。
+
+#### 1.6 总结
+
+### 二、
