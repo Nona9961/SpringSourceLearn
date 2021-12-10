@@ -3595,7 +3595,7 @@ Resource[] getResources(String locationPattern) throws IOException;
 
 2. 实现了方法`Resource[] getResources(String locationPattern) throws IOException;`
 
-   这个方法较长，有兴趣的可以看看
+   这个方法较长。
 
    - [ ] todo看一下这个方法
 
@@ -3603,4 +3603,28 @@ Resource[] getResources(String locationPattern) throws IOException;
 
 #### 1.6 总结
 
-### 二、BeanPostProcessor
+1. Spring为了统一对资源的读取而诞生了`Resource`接口，主要是通过URL来定位资源。
+2. Spring为了祛除各种`Resource`带来的复杂性，定义了策略接口`ResourceLoader`，并且有两个默认的实现类`DefaultResourceLoader`、`PathMatchingResourcePatternResolver`。帮助封装了创建`Resource`的过程（从这个角度也可以说他们是工厂）
+3. Spring默认的URL匹配模式是ant风格的，且该匹配策略就在`core`包下，可以在Spring中随意使用
+
+### 二、BeanFactoryPostProcessor、BeanPostProcessor
+
+我们在讨论`refresh()`的时候曾经多次见到了各种各样的`BeanFactoryPostProcessor`、`BeanPostProcessor`。并且对这两个接口的分析已经在IOC章节做过了，这一节我们主要是看看都有哪些值得注意的`BeanFactoryPostProcessor`、`BeanPostProcessor`。
+
+这里先帮大家回忆一下四类重要的`BeanPostProcessor`：
+
+- `InstantiationAwareBeanPostProcessor`，在`docreateBean`之前回调before方法是否给一个默认bean、在`populateBean`最开始调用after方法是否自定义注入一些属性值，并决定要不要继续让spring继续注入下去。
+- `SmartInstantiationAwareBeanPostProcessor`，`InstantiationAwareBeanPostProcessor`的子接口，三个方法各有各的地方（不推荐用户使用）
+- `DestructionAwareBeanPostProcessor`，销毁的回调
+- `MergedBeanDefinitionPostProcessor`，`doCreateBean()`开始执行的对bean定义的回调
+
+以及一类特殊的可以注册新bean定义的`BeanDefinitionRegistryPostProcessor`。
+
+此外一些不太重要的后置处理器我就略过去了。
+
+#### 2.1 BeanFactoryPostProcessor
+
+`BeanFactoryPostProcessor`主要是修改beanFactory配置，包括其中的bean定义，其中比较重要的第一个就是`ConfigurationClassPostProcessor`
+
+##### 2.1.1 ConfigurationClassPostProcessor
+
