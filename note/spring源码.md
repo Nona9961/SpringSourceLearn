@@ -3624,7 +3624,296 @@ Resource[] getResources(String locationPattern) throws IOException;
 
 #### 2.1 BeanFactoryPostProcessor
 
-`BeanFactoryPostProcessor`主要是修改beanFactory配置，包括其中的bean定义，其中比较重要的第一个就是`ConfigurationClassPostProcessor`
+`BeanFactoryPostProcessor`主要是修改beanFactory配置，包括其中的bean定义，在默认的`BeanFactoryPostProcessor`中比较重要的就是`ConfigurationClassPostProcessor`
 
 ##### 2.1.1 ConfigurationClassPostProcessor
+
+只看注释就能明白这个类为什么会放在第一个来介绍了。
+
+> 引导`@Configuration`类（配置类）的处理
+
+Java项目中我们经常使用`@Configuration`类来作为配置类，并经常在这里面使用`@Bean`注解修饰的方法来声明一个bean，这些事情究竟是如何完成的，让我们来看看这个类。
+
+首先我们注意到该类`ConfigurationClassPostProcessor`实现的是`BeanDefinitionRegistryPostProcessor`接口，那我们就要关注
+
+- `postProcessBeanDefinitionRegistry`
+- `postProcessBeanFactory`
+
+两个方法了。
+
+其次，我们注意到该类还实现了`PriorityOrdered`接口，并且在方法实现中这么写的：
+
+```java
+@Override
+public int getOrder() {
+    return Ordered.LOWEST_PRECEDENCE;  // Ordered.LOWEST_PRECEDENCE = Integer.MAX_VALUE
+}
+```
+
+即是说，`ConfigurationClassPostProcessor`比其他所有仅实现了`Ordered`接口的处理器要先处理，但比其他实现了`PriorityOrdered`接口的要后处理。
+
+- 这是因为`@Bean`对应一个bean定义，这些定义可能会被其它`BeanFactoryPostProcessor`处理。但也留了一些后路，万一以后需要有在`ConfigurationClassPostProcessor`之前干其他事情的`BeanFactoryPostProcessor`呢。
+
+下面我们跟着回调顺序来看看到底做了什么事：
+
+1. 在bean定义中找到所有被`@Configuration`修饰的类
+
+   注意，该方法是在`refresh()`方法被调用的，**此时扫描到的bean定义都已经都有了**
+
+   ```java
+   @Override
+   public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
+       // 计算registry（就是beanFactory）的hashcode
+       int registryId = System.identityHashCode(registry);
+       // 保证以前没有调用过对该beanFactory的postProcessBeanDefinitionRegistry方法
+       if (this.registriesPostProcessed.contains(registryId)) {
+           throw new IllegalStateException(
+               "postProcessBeanDefinitionRegistry already called on this post-processor against " + registry);
+       }
+       // 保证postProcessBeanFactory方法没有先调用
+       if (this.factoriesPostProcessed.contains(registryId)) {
+           throw new IllegalStateException(
+               "postProcessBeanFactory already called on this post-processor against " + registry);
+       }
+       // 注册该beanfactory的hashcode进入registriesPostProcessed以表示这个beanFactory被该类的postProcessBeanDefinitionRegistry方法处理过
+       this.registriesPostProcessed.add(registryId);
+   	// 真正处理的方法
+       processConfigBeanDefinitions(registry);
+   }
+   ```
+
+   ```java
+   public void processConfigBeanDefinitions(BeanDefinitionRegistry registry) {
+       // 被@Configuration修饰的候选BeanDefinitionHolder
+       List<BeanDefinitionHolder> configCandidates = new ArrayList<>();
+       // 获取所有beanName
+       String[] candidateNames = registry.getBeanDefinitionNames();
+   
+       for (String beanName : candidateNames) {
+           BeanDefinition beanDef = registry.getBeanDefinition(beanName);
+           // 被处理过的@Configuration类对应的bean定义里面
+           // "org.springframework.context.annotation.ConfigurationClassPostProcessor.configurationClass"的属性不为空。
+           // ConfigurationClassUtils.CONFIGURATION_CLASS_ATTRIBUTE就是ConfigurationClassPostProcessor的全限定类名加上
+           // .configurationClass。被处理过的直接跳过。
+           if (beanDef.getAttribute(ConfigurationClassUtils.CONFIGURATION_CLASS_ATTRIBUTE) != null) {
+               if (logger.isDebugEnabled()) {
+                   logger.debug("Bean definition has already been processed as a configuration class: " + beanDef);
+               }
+           }
+           // 查看该类是否被@Configuration修饰
+           else if (ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)) {
+               // 添加该BeanDefinitionHolder进入候选
+               configCandidates.add(new BeanDefinitionHolder(beanDef, beanName));
+           }
+       }
+   
+       if (configCandidates.isEmpty()) {
+           return;
+       }
+       // 第一部分——找到所有@Configuration·结束
+       // .......
+   }
+   ```
+
+   在继续解析`@Configuration`之前我们先仔细看看`ConfigurationClassUtils.checkConfigurationClassCandidate`到底干了啥
+
+   - 当然我们可以猜测，Spring通过bean定义获取到了该bean的注解，直接查看是不是`@Configuration`即可。
+
+   ```java
+   public static boolean checkConfigurationClassCandidate(
+       BeanDefinition beanDef, MetadataReaderFactory metadataReaderFactory) {
+   
+       String className = beanDef.getBeanClassName();
+       if (className == null || beanDef.getFactoryMethodName() != null) {
+           return false;
+       }
+   	// 注解元数据
+       AnnotationMetadata metadata;
+       if (beanDef instanceof AnnotatedBeanDefinition &&
+           className.equals(((AnnotatedBeanDefinition) beanDef).getMetadata().getClassName())) {
+           // 可以直接复用之前获取到了MetaData
+           metadata = ((AnnotatedBeanDefinition) beanDef).getMetadata();
+       }
+       else if (beanDef instanceof AbstractBeanDefinition && ((AbstractBeanDefinition) beanDef).hasBeanClass()) {
+           // hasBeanClass()判断是依据是this.beanClass instanceof Class，这意味着这个class已经被加载进JVM里了。
+           Class<?> beanClass = ((AbstractBeanDefinition) beanDef).getBeanClass();
+           // 如果这个bean的类是如下四种，直接返回false，表示不是@Configuration
+           if (BeanFactoryPostProcessor.class.isAssignableFrom(beanClass) ||
+               BeanPostProcessor.class.isAssignableFrom(beanClass) ||
+               AopInfrastructureBean.class.isAssignableFrom(beanClass) ||
+               EventListenerFactory.class.isAssignableFrom(beanClass)) {
+               return false;
+           }
+           // 通过class对象反射获取注解元数据
+           metadata = AnnotationMetadata.introspect(beanClass);
+       }
+       else {
+           try {
+               // 先通过全限定类名获取resource，如果没找到对应文件，假设是内部类将最后的'.'->'&'重新尝试获取
+               // 通过asm获取注解元数据
+               MetadataReader metadataReader = metadataReaderFactory.getMetadataReader(className);
+               metadata = metadataReader.getAnnotationMetadata();
+           }
+           catch (IOException ex) {
+               if (logger.isDebugEnabled()) {
+                   logger.debug("Could not find class file for introspecting configuration annotations: " +
+                                className, ex);
+               }
+               return false;
+           }
+       }
+   	// 如果注解中包含@Configuration，获取它的属性值，如果没有就是null
+       Map<String, Object> config = metadata.getAnnotationAttributes(Configuration.class.getName());
+       // 如果是@Configuration且"proxyBeanMethods"属性是true的话，为其bean定义设置属性org.springframework.context.annotation.ConfigurationClassPostProcessor.configurationClass为full
+       if (config != null && !Boolean.FALSE.equals(config.get("proxyBeanMethods"))) {
+           beanDef.setAttribute(CONFIGURATION_CLASS_ATTRIBUTE, CONFIGURATION_CLASS_FULL);
+       }
+       // 如果是@Configuration且"proxyBeanMethods"属性是false或者isConfigurationCandidate(metadata)为true
+       // isConfigurationCandidate(metadata)看了以下3点：
+       // 1. 如果metadata对应的是接口，那么他不是@Configuration候选
+       // 2. 如果该类被@Component、@ComponentScan、@Import、@ImportResource四种注解之一修饰的话，那么它是@Configuration候选
+       // 3. 如果方法有被@Bean修饰的话，那么它是@Configuration候选
+       // 为其bean定义设置属性org.springframework.context.annotation.ConfigurationClassPostProcessor.configurationClass为lite
+       else if (config != null || isConfigurationCandidate(metadata)) {
+           beanDef.setAttribute(CONFIGURATION_CLASS_ATTRIBUTE, CONFIGURATION_CLASS_LITE);
+       }
+       else {
+           return false;
+       }
+   
+       Integer order = getOrder(metadata);
+       if (order != null) {
+           beanDef.setAttribute(ORDER_ATTRIBUTE, order);
+       }
+   
+       return true;
+   }
+   ```
+
+   前半部分和我们猜的相似，确实是通过看注解有没有`@Configuration`，但后半部分对`@Configuration`也进行了分类：
+
+   - `full configuration class`指的是被`@Configuration`修饰，且`@Configuration`的属性`proxyBeanMethods`为`true`
+     - `proxyBeanMethods`默认就是true
+     - 他代表对`@Bean`修饰方法返回的对象用`CG-LIB`代理——**每次调用该方法返回的都是用一个bean**
+   - `lite configuration class`指的是以下三种：
+     - 被`@Configuration`修饰，且`@Configuration`的属性`proxyBeanMethods`为`false`
+     - 没有被`@Configuration`修饰，但是被`@Component、@ComponentScan、@Import、@ImportResource`之一修饰
+     - 没有被上面任何一个注解修饰，但是方法里面有被`@Bean`修饰的一般类
+       - 但是考虑到会进入到这段代码的前提是，**这个一般类被视作bean**，具有bean定义，所以第三种应该很少。
+   - `lite`的配置类，它的`@Bean`修饰方法返回的结果不会被CG-LIB代理。
+
+2. 准备工作
+
+   ```java
+   public static boolean checkConfigurationClassCandidate(
+       BeanDefinition beanDef, MetadataReaderFactory metadataReaderFactory) {
+   	
+       // .......
+       // 第二部分——准备工作·开始
+   
+       // 对@Order进行排序
+       configCandidates.sort((bd1, bd2) -> {
+           int i1 = ConfigurationClassUtils.getOrder(bd1.getBeanDefinition());
+           int i2 = ConfigurationClassUtils.getOrder(bd2.getBeanDefinition());
+           return Integer.compare(i1, i2);
+       });
+   
+       // 获取BeanName生成器，如果有相应的bean的话直接使用该bean，如果没有使用默认的FullyQualifiedAnnotationBeanNameGenerator.INSTANCE
+       SingletonBeanRegistry sbr = null;
+       if (registry instanceof SingletonBeanRegistry) {
+           sbr = (SingletonBeanRegistry) registry;
+           if (!this.localBeanNameGeneratorSet) {
+               BeanNameGenerator generator = (BeanNameGenerator) sbr.getSingleton(
+                   AnnotationConfigUtils.CONFIGURATION_BEAN_NAME_GENERATOR);
+               if (generator != null) {
+                   this.componentScanBeanNameGenerator = generator;
+                   this.importBeanNameGenerator = generator;
+               }
+           }
+       }
+   	// 如果没有设置环境，设置环境
+       if (this.environment == null) {
+           this.environment = new StandardEnvironment();
+       }
+   
+       // 第二部分——准备工作·结束
+       // ......
+   }
+   ```
+
+   很简单，没有什么多说的
+
+3. 解析`@Configuration`类
+
+   ```java
+   public static boolean checkConfigurationClassCandidate(
+       BeanDefinition beanDef, MetadataReaderFactory metadataReaderFactory) {
+   
+       // .......
+       // 第三部分——解析@Configuration·开始
+   
+       // Parse each @Configuration class
+       ConfigurationClassParser parser = new ConfigurationClassParser(
+           this.metadataReaderFactory, this.problemReporter, this.environment,
+           this.resourceLoader, this.componentScanBeanNameGenerator, registry);
+   
+       Set<BeanDefinitionHolder> candidates = new LinkedHashSet<>(configCandidates);
+       Set<ConfigurationClass> alreadyParsed = new HashSet<>(configCandidates.size());
+       do {
+           StartupStep processConfig = this.applicationStartup.start("spring.context.config-classes.parse");
+           parser.parse(candidates);
+           parser.validate();
+   
+           Set<ConfigurationClass> configClasses = new LinkedHashSet<>(parser.getConfigurationClasses());
+           configClasses.removeAll(alreadyParsed);
+   
+           // Read the model and create bean definitions based on its content
+           if (this.reader == null) {
+               this.reader = new ConfigurationClassBeanDefinitionReader(
+                   registry, this.sourceExtractor, this.resourceLoader, this.environment,
+                   this.importBeanNameGenerator, parser.getImportRegistry());
+           }
+           this.reader.loadBeanDefinitions(configClasses);
+           alreadyParsed.addAll(configClasses);
+           processConfig.tag("classCount", () -> String.valueOf(configClasses.size())).end();
+   
+           candidates.clear();
+           if (registry.getBeanDefinitionCount() > candidateNames.length) {
+               String[] newCandidateNames = registry.getBeanDefinitionNames();
+               Set<String> oldCandidateNames = new HashSet<>(Arrays.asList(candidateNames));
+               Set<String> alreadyParsedClasses = new HashSet<>();
+               for (ConfigurationClass configurationClass : alreadyParsed) {
+                   alreadyParsedClasses.add(configurationClass.getMetadata().getClassName());
+               }
+               for (String candidateName : newCandidateNames) {
+                   if (!oldCandidateNames.contains(candidateName)) {
+                       BeanDefinition bd = registry.getBeanDefinition(candidateName);
+                       if (ConfigurationClassUtils.checkConfigurationClassCandidate(bd, this.metadataReaderFactory) &&
+                           !alreadyParsedClasses.contains(bd.getBeanClassName())) {
+                           candidates.add(new BeanDefinitionHolder(bd, candidateName));
+                       }
+                   }
+               }
+               candidateNames = newCandidateNames;
+           }
+       }
+       while (!candidates.isEmpty());
+   
+       // Register the ImportRegistry as a bean in order to support ImportAware @Configuration classes
+       if (sbr != null && !sbr.containsSingleton(IMPORT_REGISTRY_BEAN_NAME)) {
+           sbr.registerSingleton(IMPORT_REGISTRY_BEAN_NAME, parser.getImportRegistry());
+       }
+   
+       if (this.metadataReaderFactory instanceof CachingMetadataReaderFactory) {
+           // Clear cache in externally provided MetadataReaderFactory; this is a no-op
+           // for a shared cache since it'll be cleared by the ApplicationContext.
+           ((CachingMetadataReaderFactory) this.metadataReaderFactory).clearCache();
+       }
+       // 第三部分——解析@Configuration·结束
+   }
+   ```
+
+   
+
+4. 
 
