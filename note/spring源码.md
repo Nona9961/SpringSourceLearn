@@ -3634,6 +3634,8 @@ Resource[] getResources(String locationPattern) throws IOException;
 
 Java项目中我们经常使用`@Configuration`类来作为配置类，并经常在这里面使用`@Bean`注解修饰的方法来声明一个bean，这些事情究竟是如何完成的，让我们来看看这个类。
 
+- **注意一个问题，我们经常在`@Configuration`修饰的类里面使用@Value注解或者@ConfigurationProperties来为字段赋值配置文件的内容，但这部分的解析不在这个后置处理器中进行。ConfigurationClassPostProcessor只处理@Bean方法**
+
 首先我们注意到该类`ConfigurationClassPostProcessor`实现的是`BeanDefinitionRegistryPostProcessor`接口，那我们就要关注
 
 - `postProcessBeanDefinitionRegistry`
@@ -3850,70 +3852,97 @@ public int getOrder() {
        BeanDefinition beanDef, MetadataReaderFactory metadataReaderFactory) {
    
        // .......
-       // 第三部分——解析@Configuration·开始
+       // 第三部分——解析Configuration候选·开始
    
-       // Parse each @Configuration class
+       // 创建解析器，作用是将这些BeanDefinitionHolder解析为ConfigurationClass配置类（主要包含@Bean方法和@Import注解）
        ConfigurationClassParser parser = new ConfigurationClassParser(
            this.metadataReaderFactory, this.problemReporter, this.environment,
            this.resourceLoader, this.componentScanBeanNameGenerator, registry);
-   
+   	// 待解析候选
        Set<BeanDefinitionHolder> candidates = new LinkedHashSet<>(configCandidates);
+       // 已经解析过了的
        Set<ConfigurationClass> alreadyParsed = new HashSet<>(configCandidates.size());
        do {
            StartupStep processConfig = this.applicationStartup.start("spring.context.config-classes.parse");
+           // 解析这些BeanDefinitionHolder，具体的分析在下面
            parser.parse(candidates);
+           // 验证ConfigurationClass
            parser.validate();
-   
+   		// 解析出来的ConfigurationClass
            Set<ConfigurationClass> configClasses = new LinkedHashSet<>(parser.getConfigurationClasses());
+           // 去除已经被解析过的
            configClasses.removeAll(alreadyParsed);
    
-           // Read the model and create bean definitions based on its content
+           // 如果没有的话，new一个reader；该reader用于注册@Bean方法返回的bean的bean定义
            if (this.reader == null) {
                this.reader = new ConfigurationClassBeanDefinitionReader(
                    registry, this.sourceExtractor, this.resourceLoader, this.environment,
                    this.importBeanNameGenerator, parser.getImportRegistry());
            }
+           // 注册bean定义
            this.reader.loadBeanDefinitions(configClasses);
+           // 标记这些configClasses为一解析
            alreadyParsed.addAll(configClasses);
            processConfig.tag("classCount", () -> String.valueOf(configClasses.size())).end();
-   
+   		// 清空候选
            candidates.clear();
+           // 考虑到注册进来的bean定义可能也是一个Configuration候选（注意候选不只是@Configuration修饰的类），所以要重新解析
+           // 如果新注册了bean定义进来
            if (registry.getBeanDefinitionCount() > candidateNames.length) {
                String[] newCandidateNames = registry.getBeanDefinitionNames();
+               // 执行注册@Bean之前beanfactory有的bean定义
                Set<String> oldCandidateNames = new HashSet<>(Arrays.asList(candidateNames));
                Set<String> alreadyParsedClasses = new HashSet<>();
                for (ConfigurationClass configurationClass : alreadyParsed) {
+                   // 已经被解析过ConfigurationClass的类名
                    alreadyParsedClasses.add(configurationClass.getMetadata().getClassName());
                }
                for (String candidateName : newCandidateNames) {
+                   // 如果是新注册的bean名
                    if (!oldCandidateNames.contains(candidateName)) {
                        BeanDefinition bd = registry.getBeanDefinition(candidateName);
+                       // 且这个bean是候选也没有被解析过
                        if (ConfigurationClassUtils.checkConfigurationClassCandidate(bd, this.metadataReaderFactory) &&
                            !alreadyParsedClasses.contains(bd.getBeanClassName())) {
+                           // 加入候选集合
                            candidates.add(new BeanDefinitionHolder(bd, candidateName));
                        }
                    }
                }
+               // 更新候选名
                candidateNames = newCandidateNames;
            }
        }
+       // 开始循环重新解析注册直到没有候选为止
        while (!candidates.isEmpty());
    
-       // Register the ImportRegistry as a bean in order to support ImportAware @Configuration classes
        if (sbr != null && !sbr.containsSingleton(IMPORT_REGISTRY_BEAN_NAME)) {
            sbr.registerSingleton(IMPORT_REGISTRY_BEAN_NAME, parser.getImportRegistry());
        }
    
        if (this.metadataReaderFactory instanceof CachingMetadataReaderFactory) {
-           // Clear cache in externally provided MetadataReaderFactory; this is a no-op
-           // for a shared cache since it'll be cleared by the ApplicationContext.
            ((CachingMetadataReaderFactory) this.metadataReaderFactory).clearCache();
        }
-       // 第三部分——解析@Configuration·结束
+       // 第三部分——解析Configuration候选·结束
    }
+   ```
+
+   可见和处理`postProcessBeanDefinitionRegistry`一样，这种代码过程中出现新的待处理的类，**就用一个循环来完成**。并且为了不多次处理同一个实例，加入了很多缓存。
+
+   在整个流程中，我们暂时略去了`ConfigurationClassParser`解析类和`ConfigurationClassBeanDefinitionReader`读取类的研究，现在我们就来看看这两个类都做了些什么。
+
+4. `ConfigurationClassParser`解析类
+
+   该类的作用就是将一个`Configuration`候选解析成为一系列`ConfigurationClass`（配置类）。
+
+   那看来不得不先看一下`ConfigurationClass`是做什么的。
+
+   一个`ConfigurationClass`代表着一个含有`@Bean`方法的类，它不仅持有自己的`@Bean`方法，还可以获取到祖先类中的`@Bean`
+
+   ```hava
    ```
 
    
 
-4. 
+5. 
 
